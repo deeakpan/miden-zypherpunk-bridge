@@ -39,3 +39,33 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# rust
+**/target/
+**/*.rs.bk
+# Keep Cargo.lock for applications (not libraries)
+# Cargo.lock
+
+# database files
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-shm
+*.db-wal
+
+# keystore
+/keystore/
+/store.sqlite3
+
+# wallet data
+/wallet/*/data.sqlite
+/wallet/*/blockmeta.sqlite
+/wallet/*/blocks/
+/wallet/*/tor/
+/wallet/*/key.txt
+/wallet/*/keys.toml
+
+# miden node data
+/miden-local-node/data/
+/miden-local-node/accounts/
