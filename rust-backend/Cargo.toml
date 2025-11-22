@@ -3,6 +3,10 @@ name = "rust-backend"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "create_account"
+path = "src/bin/create_account.rs"
+
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
 miden-client-sqlite-store = { version = "0.12" }
@@ -17,3 +21,5 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 tokio = { version = "1.46", features = ["rt-multi-thread", "net", "macros", "fs"] }
 rand_chacha = "0.9.0"
 rocket = { version = "0.5.1", features = ["json"] }
+rocket_cors = "0.6.0"
+rusqlite = { version = "^0.36", features = ["bundled"] }

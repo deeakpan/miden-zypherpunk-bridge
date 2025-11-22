@@ -19,10 +19,16 @@ use miden_objects::{
 use rand::{rngs::StdRng, RngCore, rng};
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
+use rocket_cors::{AllowedOrigins, CorsOptions};
+use rust_backend::bridge::deposit::{ClaimDepositRequest, ClaimDepositResponse};
+use rust_backend::db::deposits::DepositTracker;
+use rust_backend::miden::recipient::build_deposit_recipient;
+use rust_backend::zcash::bridge_wallet::BridgeWallet;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::time::Duration;
+use miden_objects::{account::AccountId, Word};
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -51,6 +57,8 @@ struct FaucetResponse {
 struct State {
     rpc: Arc<dyn NodeRpcClient + Send + Sync + 'static>,
     keystore: Arc<FilesystemKeyStore<StdRng>>,
+    bridge_wallet: BridgeWallet,
+    deposit_tracker: Arc<Mutex<DepositTracker>>,
 }
 
 async fn init_client(keystore: Arc<FilesystemKeyStore<StdRng>>) -> Result<miden_client::Client<FilesystemKeyStore<StdRng>>, String> {
@@ -109,19 +117,17 @@ fn health() -> &'static str {
 
 #[post("/account/create")]
 async fn create_account(state: &rocket::State<State>) -> Result<Json<AccountResponse>, String> {
-    let keystore = state.keystore.clone();
-    
-    // Run client operations in blocking context to avoid Send requirement
+    let keystore_clone = state.keystore.clone();
+    let keystore_for_key = state.keystore.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let handle = tokio::runtime::Handle::try_current()
-            .map_err(|_| "Not in async context".to_string())?;
-        
-        handle.block_on(async {
-            let mut client = init_client(keystore.clone()).await?;
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            let mut client = init_client(keystore_clone).await?;
             
             // Generate account seed
+            let mut rng = rng();
             let mut init_seed = [0_u8; 32];
-            rng().fill_bytes(&mut init_seed);
+            rng.fill_bytes(&mut init_seed);
             
             // Generate key pair
             let key_pair = AuthSecretKey::new_rpo_falcon512();
@@ -129,7 +135,7 @@ async fn create_account(state: &rocket::State<State>) -> Result<Json<AccountResp
             // Build the account
             let account = AccountBuilder::new(init_seed)
                 .account_type(AccountType::RegularAccountUpdatableCode)
-                .storage_mode(AccountStorageMode::Public)
+                .storage_mode(AccountStorageMode::Private)
                 .with_auth_component(AuthRpoFalcon512::new(key_pair.public_key().to_commitment()))
                 .with_component(BasicWallet)
                 .build()
@@ -142,39 +148,37 @@ async fn create_account(state: &rocket::State<State>) -> Result<Json<AccountResp
                 .map_err(|e| format!("Failed to add account: {}", e))?;
             
             // Add the key pair to the keystore
-            keystore
-                .add_key(&key_pair)
+            keystore_for_key.add_key(&key_pair)
                 .map_err(|e| format!("Failed to add key to keystore: {}", e))?;
             
             let account_id_bech32 = account.id().to_bech32(NetworkId::Testnet);
             
-            Ok::<_, String>(AccountResponse {
+            Ok(AccountResponse {
                 account_id: account_id_bech32,
                 success: true,
             })
         })
     })
     .await
-    .map_err(|e| format!("Spawn blocking error: {}", e))??;
-    
+    .map_err(|e| format!("Spawn blocking error: {}", e))?
+    .map_err(|e: String| format!("Client operation error: {}", e))?;
+
     Ok(Json(result))
 }
 
 #[post("/faucet/create")]
 async fn create_faucet(state: &rocket::State<State>) -> Result<Json<FaucetResponse>, String> {
-    let keystore = state.keystore.clone();
-    
-    // Run client operations in blocking context to avoid Send requirement
+    let keystore_clone = state.keystore.clone();
+    let keystore_for_key = state.keystore.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let handle = tokio::runtime::Handle::try_current()
-            .map_err(|_| "Not in async context".to_string())?;
-        
-        handle.block_on(async {
-            let mut client = init_client(keystore.clone()).await?;
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            let mut client = init_client(keystore_clone).await?;
             
             // Generate faucet seed
+            let mut rng = rng();
             let mut init_seed = [0u8; 32];
-            rng().fill_bytes(&mut init_seed);
+            rng.fill_bytes(&mut init_seed);
             
             // Faucet parameters
             let symbol = TokenSymbol::new("MID").map_err(|e| format!("Invalid symbol: {}", e))?;
@@ -200,8 +204,7 @@ async fn create_faucet(state: &rocket::State<State>) -> Result<Json<FaucetRespon
                 .map_err(|e| format!("Failed to add faucet: {}", e))?;
             
             // Add the key pair to the keystore
-            keystore
-                .add_key(&key_pair)
+            keystore_for_key.add_key(&key_pair)
                 .map_err(|e| format!("Failed to add key to keystore: {}", e))?;
             
             let faucet_account_id_bech32 = faucet_account.id().to_bech32(NetworkId::Testnet);
@@ -214,7 +217,7 @@ async fn create_faucet(state: &rocket::State<State>) -> Result<Json<FaucetRespon
             
             tokio::time::sleep(Duration::from_secs(2)).await;
             
-            Ok::<_, String>(FaucetResponse {
+            Ok(FaucetResponse {
                 faucet_account_id: faucet_account_id_bech32,
                 symbol: "MID".to_string(),
                 decimals,
@@ -224,10 +227,167 @@ async fn create_faucet(state: &rocket::State<State>) -> Result<Json<FaucetRespon
         })
     })
     .await
-    .map_err(|e| format!("Spawn blocking error: {}", e))??;
-    
+    .map_err(|e| format!("Spawn blocking error: {}", e))?
+    .map_err(|e: String| format!("Client operation error: {}", e))?;
+
     Ok(Json(result))
 }
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct HashRequest {
+    account_id: String,
+    secret: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct HashResponse {
+    recipient_hash: String,
+    success: bool,
+}
+
+#[post("/deposit/hash", format = "json", data = "<request>")]
+async fn generate_hash_endpoint(
+    request: Json<HashRequest>,
+) -> Result<Json<HashResponse>, String> {
+    // Parse account_id and secret - handle both hex and bech32 formats
+    let account_id = if request.account_id.starts_with("mtst") || request.account_id.starts_with("mm") {
+        // Parse bech32 format (e.g., mtst1...) - returns (NetworkId, AccountId)
+        let (_, acc_id) = AccountId::from_bech32(&request.account_id)
+            .map_err(|e| format!("Invalid bech32 account_id: {}", e))?;
+        acc_id
+    } else {
+        // Parse hex format
+        AccountId::from_hex(&request.account_id)
+            .map_err(|e| format!("Invalid hex account_id: {}", e))?
+    };
+    
+    let secret = Word::try_from(request.secret.as_str())
+        .map_err(|e| format!("Invalid secret: {}", e))?;
+    
+    // Build recipient and get hash
+    let recipient = build_deposit_recipient(account_id, secret)
+        .map_err(|e| format!("Failed to build recipient: {}", e))?;
+    let recipient_hash = recipient.digest().to_hex();
+    
+    Ok(Json(HashResponse {
+        recipient_hash,
+        success: true,
+    }))
+}
+
+#[post("/deposit/claim", format = "json", data = "<request>")]
+async fn claim_deposit_endpoint(
+    state: &rocket::State<State>,
+    request: Json<ClaimDepositRequest>,
+) -> Result<Json<ClaimDepositResponse>, String> {
+    // Parse account_id and secret - handle both hex and bech32 formats
+    let account_id = if request.account_id.starts_with("mtst") || request.account_id.starts_with("mm") {
+        // Parse bech32 format (e.g., mtst1...) - returns (NetworkId, AccountId)
+        let (_, acc_id) = AccountId::from_bech32(&request.account_id)
+            .map_err(|e| format!("Invalid bech32 account_id: {}", e))?;
+        acc_id
+    } else {
+        // Parse hex format
+        AccountId::from_hex(&request.account_id)
+            .map_err(|e| format!("Invalid hex account_id: {}", e))?
+    };
+    
+    let secret = Word::try_from(request.secret.as_str())
+        .map_err(|e| format!("Invalid secret: {}", e))?;
+    
+    // Rebuild recipient hash to scan for deposits
+    let recipient = build_deposit_recipient(account_id, secret)
+        .map_err(|e| format!("Failed to build recipient: {}", e))?;
+    let recipient_hash = recipient.digest().to_hex();
+    
+    // Check if this recipient hash has already been claimed (double-spend protection)
+    {
+        let tracker = state.deposit_tracker.lock()
+            .map_err(|e| format!("Failed to lock deposit tracker: {}", e))?;
+        
+        if tracker.is_claimed(&recipient_hash)
+            .map_err(|e| format!("Failed to check claim status: {}", e))? {
+            return Ok(Json(ClaimDepositResponse {
+                success: false,
+                note_id: None,
+                transaction_id: None,
+                message: "This deposit has already been claimed. Each recipient hash can only be used once.".to_string(),
+            }));
+        }
+    } // Lock released here
+    
+    // Scan bridge Zcash testnet wallet for deposits with this memo
+    let bridge_address = std::env::var("BRIDGE_ZCASH_ADDRESS")
+        .unwrap_or_else(|_| "utest1s7vrs7ycxvpu379zvtxt0fnc0efseur2f8g2s8puqls7nk45l6p7wvglu3rph9us9qzsjww44ly3wxlsul0jcpqx8qwvwqz4sq48rjj0cn59956sjsrz5ufuswd5ujy89n3vh264wx3843pxscnrf0ulku4990h65h5ll9r0j3q82mjgm2sx7lfnrkfkuqw9l2m7yfmgc4jvzq6n8j2".to_string());
+    
+    let deposit_info = rust_backend::bridge::deposit::scan_zcash_deposits(
+        &state.bridge_wallet,
+        &recipient_hash,
+        &bridge_address,
+    )
+    .await
+    .map_err(|e| format!("Failed to scan deposits: {}", e))?;
+    
+    let (txid, amount) = deposit_info.ok_or_else(|| {
+        "No deposit found with matching recipient hash. Make sure you've sent TAZ to the bridge address with the correct memo.".to_string()
+    })?;
+    
+    // Get faucet_id from env or use a default
+    let faucet_id_hex = std::env::var("WTAZ_FAUCET_ID")
+        .unwrap_or_else(|_| "0x00000000000000000000000000000000".to_string());
+    let faucet_id = AccountId::from_hex(&faucet_id_hex)
+        .map_err(|e| format!("Invalid faucet_id: {}", e))?;
+    
+    // Claim the deposit by minting note to user's account
+    // Wrap in spawn_blocking to handle Send/Sync issues with Miden client
+    let project_root = std::env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let keystore_path = project_root.join("keystore");
+    let store_path = project_root.join("bridge_store.sqlite3");
+    let rpc_url = std::env::var("RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
+    
+    let (note_id, tx_id) = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            rust_backend::bridge::deposit::mint_deposit_note(
+                account_id,
+                secret,
+                faucet_id,
+                amount,
+                keystore_path,
+                store_path,
+                &rpc_url,
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(|e| format!("Spawn blocking error: {}", e))?
+    .map_err(|e: String| format!("Mint deposit note error: {}", e))?;
+    
+    // Record the claim to prevent double-spending
+    // NOTE: We only store recipient_hash, NOT account_id, for privacy
+    let tracker = state.deposit_tracker.lock()
+        .map_err(|e| format!("Failed to lock deposit tracker: {}", e))?;
+    
+    tracker.record_claim(
+        &recipient_hash,
+        &txid.clone(),
+        amount,
+    )
+    .map_err(|e| format!("Failed to record claim: {}", e))?;
+    
+    Ok(Json(ClaimDepositResponse {
+        success: true,
+        note_id: Some(note_id),
+        transaction_id: Some(tx_id),
+        message: format!("Deposit claimed successfully. Note minted to account."),
+    }))
+}
+
 
 #[launch]
 fn rocket() -> _ {
@@ -249,10 +409,35 @@ fn rocket() -> _ {
             .expect("Failed to create keystore"),
     );
     
+    // Initialize bridge wallet
+    let project_root = std::env::current_dir()
+        .expect("Failed to get current directory");
+    let bridge_wallet = BridgeWallet::new(project_root.clone());
+    
+    // Initialize deposit tracker database
+    let db_path = project_root.join("deposits.db");
+    let deposit_tracker = DepositTracker::new(db_path)
+        .expect("Failed to initialize deposit tracker database");
+    
     rocket::build()
         .manage(State {
             rpc,
             keystore,
+            bridge_wallet,
+            deposit_tracker: Arc::new(Mutex::new(deposit_tracker)),
         })
-        .mount("/", routes![get_block, health, create_account, create_faucet])
+        .mount("/", routes![get_block, health, create_account, create_faucet, generate_hash_endpoint, claim_deposit_endpoint])
+        .attach(
+            CorsOptions::default()
+                .allowed_origins(AllowedOrigins::all())
+                .allowed_methods(
+                    vec![rocket::http::Method::Get, rocket::http::Method::Post, rocket::http::Method::Options]
+                        .into_iter()
+                        .map(From::from)
+                        .collect(),
+                )
+                .allow_credentials(true)
+                .to_cors()
+                .expect("Failed to create CORS fairing")
+        )
 }
