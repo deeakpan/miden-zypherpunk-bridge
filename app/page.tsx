@@ -17,6 +17,7 @@ export default function App() {
   const [copiedHash, setCopiedHash] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [hashing, setHashing] = useState(false);
+  const [accountIdError, setAccountIdError] = useState("");
 
   const midenDepositAddress = "utest1s7vrs7ycxvpu379zvtxt0fnc0efseur2f8g2s8puqls7nk45l6p7wvglu3rph9us9qzsjww44ly3wxlsul0jcpqx8qwvwqz4sq48rjj0cn59956sjsrz5ufuswd5ujy89n3vh264wx3843pxscnrf0ulku4990h65h5ll9r0j3q82mjgm2sx7lfnrkfkuqw9l2m7yfmgc4jvzq6n8j2";
 
@@ -30,14 +31,62 @@ export default function App() {
     setSecret(hex);
   };
 
+  const validateAccountId = (id: string): string => {
+    const trimmed = id.trim();
+    if (!trimmed) {
+      return "Account ID cannot be empty";
+    }
+    
+    // Check bech32 format (mtst1... or mm...)
+    if (trimmed.startsWith('mtst') || trimmed.startsWith('mm')) {
+      // Basic bech32 validation: should be at least 10 chars and contain valid characters
+      if (trimmed.length < 10) {
+        return "Invalid bech32 format (too short)";
+      }
+      // Bech32 uses base32 characters: [a-z0-9] excluding some letters
+      const bech32Regex = /^[a-z0-9_]+$/;
+      if (!bech32Regex.test(trimmed)) {
+        return "Invalid bech32 format (invalid characters)";
+      }
+      return "";
+    }
+    
+    // Check hex format
+    const hexStr = trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed;
+    const hexRegex = /^[0-9a-fA-F]+$/;
+    if (!hexRegex.test(hexStr)) {
+      return "Invalid hex format";
+    }
+    if (hexStr.length !== 64) {
+      return "Hex account ID must be 64 characters (32 bytes)";
+    }
+    
+    return "";
+  };
+
+  const handleAccountIdChange = (value: string) => {
+    setAccountId(value);
+    const error = validateAccountId(value);
+    setAccountIdError(error);
+  };
+
   const generateHash = async () => {
     if (!accountId) {
       alert("Please enter your Miden account ID first");
       return;
     }
 
+    const trimmed = accountId.trim();
+    const validationError = validateAccountId(trimmed);
+    if (validationError) {
+      setAccountIdError(validationError);
+      alert(validationError);
+      return;
+    }
+
     try {
       setHashing(true);
+      setAccountIdError("");
       
       // Generate secret if it doesn't exist
       let secretToUse = secret;
@@ -50,33 +99,55 @@ export default function App() {
         setSecret(secretToUse);
       }
       
-      // Call backend API to generate recipient hash
-      // Backend expects hex format - if accountId is bech32, we need to convert
-      // For now, send as-is and let the backend handle it, or convert if needed
-      let accountIdForApi = accountId;
-      if (accountId.startsWith('mtst') || accountId.startsWith('mm')) {
-        // Convert bech32 to hex for backend API
-        // The SDK's AccountId.fromHex might accept bech32, but backend needs hex
-        // We'll need to parse and convert - for now, try using the accountId as-is
-        // and update backend to accept bech32, or implement bech32->hex conversion
-        // TODO: Implement proper bech32 to hex conversion
-        accountIdForApi = accountId; // Temporary - backend needs to be updated or we need conversion
+      // Prefer hex format from localStorage if user entered bech32 format
+      // Rust backend can handle bech32, but hex is more reliable (avoids underscore issues)
+      // If user entered bech32 and we have hex stored, use hex; otherwise use what user entered
+      let accountIdForApi = trimmed;
+      if (typeof window !== "undefined" && (trimmed.startsWith('mtst') || trimmed.startsWith('mm'))) {
+        const storedHex = localStorage.getItem("miden_account_id_hex");
+        const storedBech32 = localStorage.getItem("miden_account_id");
+        console.log("Stored hex:", storedHex, "Length:", storedHex?.length);
+        console.log("Stored bech32:", storedBech32);
+        console.log("Entered:", trimmed);
+        // If the entered bech32 matches stored bech32, use stored hex
+        if (storedHex && storedBech32 && storedBech32.trim() === trimmed) {
+          accountIdForApi = storedHex;
+          console.log("Using stored hex:", accountIdForApi);
+        } else {
+          console.log("Not using stored hex - match failed or missing");
+        }
       }
+      
+      console.log("Sending to backend - account_id:", accountIdForApi, "Length:", accountIdForApi.length);
       
       const response = await fetch("http://127.0.0.1:8000/deposit/hash", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          account_id: accountIdForApi,
+          account_id: accountIdForApi, // Use hex if available, otherwise use entered format
           secret: secretToUse,
         }),
       });
 
+      let data;
+      try {
+        data = await response.json();
+      } catch (jsonErr) {
+        // If response is not JSON, try to get text
+        const text = await response.text();
+        throw new Error(`Server error: ${text || response.statusText}`);
+      }
+      
       if (!response.ok) {
-        throw new Error("Failed to generate hash");
+        // Handle JSON error response
+        const errorMsg = data.error || data.message || "Failed to generate hash";
+        throw new Error(errorMsg);
       }
 
-      const data = await response.json();
+      if (!data.success || !data.recipient_hash) {
+        throw new Error(data.error || "Invalid response from server");
+      }
+
       setRecipientHash(data.recipient_hash);
     } catch (err: any) {
       console.error("Hash error:", err);
@@ -252,10 +323,17 @@ export default function App() {
                   <input
                     type="text"
                     value={accountId}
-                    onChange={(e) => setAccountId(e.target.value)}
-                    placeholder="Enter your Miden account ID (hex)"
-                    className="w-full px-5 py-4 bg-zinc-950/80 border border-zinc-900 rounded-xl text-sm font-mono text-zinc-300 focus:outline-none focus:border-[#FF6B35]/50 transition-all placeholder-zinc-700"
+                    onChange={(e) => handleAccountIdChange(e.target.value)}
+                    placeholder="mtst..."
+                    className={`w-full px-5 py-4 bg-zinc-950/80 border rounded-xl text-sm font-mono text-zinc-300 focus:outline-none transition-all placeholder-zinc-700 ${
+                      accountIdError 
+                        ? "border-red-500/50 focus:border-red-500/70" 
+                        : "border-zinc-900 focus:border-[#FF6B35]/50"
+                    }`}
                   />
+                  {accountIdError && (
+                    <p className="mt-2 text-xs text-red-400">{accountIdError}</p>
+                  )}
                 </div>
 
                 {/* Hash Button */}

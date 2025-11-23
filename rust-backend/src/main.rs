@@ -19,6 +19,8 @@ use miden_objects::{
 use rand::{rngs::StdRng, RngCore, rng};
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
+use rocket::http::Status;
+use rocket::response::status;
 use rocket_cors::{AllowedOrigins, CorsOptions};
 use rust_backend::bridge::deposit::{ClaimDepositRequest, ClaimDepositResponse};
 use rust_backend::db::deposits::DepositTracker;
@@ -247,34 +249,138 @@ struct HashResponse {
     success: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ErrorResponse {
+    success: bool,
+    error: String,
+}
+
+#[options("/deposit/hash")]
+fn options_hash() -> rocket::http::Status {
+    rocket::http::Status::Ok
+}
+
 #[post("/deposit/hash", format = "json", data = "<request>")]
 async fn generate_hash_endpoint(
     request: Json<HashRequest>,
-) -> Result<Json<HashResponse>, String> {
+) -> Result<Json<HashResponse>, status::Custom<Json<ErrorResponse>>> {
+    // Trim whitespace from account_id
+    let account_id_str = request.account_id.trim();
+    
+    if account_id_str.is_empty() {
+        return Err(status::Custom(
+            Status::BadRequest,
+            Json(ErrorResponse {
+                success: false,
+                error: "account_id cannot be empty. Please provide a valid Miden account ID in bech32 (mtst1...) or hex format.".to_string(),
+            }),
+        ));
+    }
+    
     // Parse account_id and secret - handle both hex and bech32 formats
-    let account_id = if request.account_id.starts_with("mtst") || request.account_id.starts_with("mm") {
-        // Parse bech32 format (e.g., mtst1...) - returns (NetworkId, AccountId)
-        let (_, acc_id) = AccountId::from_bech32(&request.account_id)
-            .map_err(|e| format!("Invalid bech32 account_id: {}", e))?;
-        acc_id
+    // Try bech32 first if it starts with mtst/mm, otherwise try hex
+    let account_id = if account_id_str.starts_with("mtst") || account_id_str.starts_with("mm") {
+        // Try bech32 format first (e.g., mtst1...)
+        match AccountId::from_bech32(account_id_str) {
+            Ok((_, acc_id)) => acc_id,
+            Err(bech32_err) => {
+                // If bech32 fails, try hex as fallback (maybe user pasted hex that starts with mtst)
+                let hex_str = if account_id_str.starts_with("0x") {
+                    &account_id_str[2..]
+                } else {
+                    account_id_str
+                };
+                AccountId::from_hex(hex_str).map_err(|hex_err| {
+                    status::Custom(
+                        Status::BadRequest,
+                        Json(ErrorResponse {
+                            success: false,
+                            error: format!(
+                                "Invalid account_id format. Tried bech32 (mtst1...): {}. Tried hex: {}. Please provide a valid Miden account ID in bech32 (mtst1...) or hex format.",
+                                bech32_err, hex_err
+                            ),
+                        }),
+                    )
+                })?
+            }
+        }
     } else {
-        // Parse hex format
-        AccountId::from_hex(&request.account_id)
-            .map_err(|e| format!("Invalid hex account_id: {}", e))?
+        // Parse hex format - check if it starts with 0x
+        let hex_str = if account_id_str.starts_with("0x") {
+            &account_id_str[2..]
+        } else {
+            account_id_str
+        };
+        
+        eprintln!("DEBUG /deposit/hash: Received hex_str: '{}', length: {}", hex_str, hex_str.len());
+        
+        // AccountId::from_hex expects 32 characters total (including 0x prefix)
+        // So if hex is 30 chars, add 0x to make 32 total. If 32 chars, add 0x to make 34 (but that's wrong)
+        // Actually, let's just add 0x prefix - it should handle the length
+        let hex_with_prefix = if !hex_str.starts_with("0x") {
+            format!("0x{}", hex_str)
+        } else {
+            hex_str.to_string()
+        };
+        
+        eprintln!("DEBUG /deposit/hash: Final hex with prefix: '{}', length: {}", hex_with_prefix, hex_with_prefix.len());
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| {
+                eprintln!("DEBUG /deposit/hash: Failed to parse hex '{}': {:?}", hex_with_prefix, e);
+                status::Custom(
+                    Status::BadRequest,
+                    Json(ErrorResponse {
+                        success: false,
+                        error: format!(
+                            "Invalid hex account_id: {}. Please provide a valid Miden account ID in bech32 (mtst1...) or hex format (with or without 0x prefix).",
+                            e
+                        ),
+                    }),
+                )
+            })?
     };
     
-    let secret = Word::try_from(request.secret.as_str())
-        .map_err(|e| format!("Invalid secret: {}", e))?;
+    // Parse secret - Word::try_from expects hex with 0x prefix
+    let secret_hex = if request.secret.starts_with("0x") {
+        request.secret.clone()
+    } else {
+        format!("0x{}", request.secret)
+    };
+    
+    let secret = Word::try_from(secret_hex.as_str())
+        .map_err(|e| {
+            status::Custom(
+                Status::BadRequest,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Invalid secret: {}", e),
+                }),
+            )
+        })?;
     
     // Build recipient and get hash
     let recipient = build_deposit_recipient(account_id, secret)
-        .map_err(|e| format!("Failed to build recipient: {}", e))?;
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to build recipient: {}", e),
+                }),
+            )
+        })?;
     let recipient_hash = recipient.digest().to_hex();
     
     Ok(Json(HashResponse {
         recipient_hash,
         success: true,
     }))
+}
+
+#[options("/deposit/claim")]
+fn options_claim() -> rocket::http::Status {
+    rocket::http::Status::Ok
 }
 
 #[post("/deposit/claim", format = "json", data = "<request>")]
@@ -289,12 +395,32 @@ async fn claim_deposit_endpoint(
             .map_err(|e| format!("Invalid bech32 account_id: {}", e))?;
         acc_id
     } else {
-        // Parse hex format
-        AccountId::from_hex(&request.account_id)
+        // Parse hex format - check if it starts with 0x
+        let hex_str = if request.account_id.starts_with("0x") {
+            &request.account_id[2..]
+        } else {
+            &request.account_id
+        };
+        
+        // AccountId::from_hex expects hex with 0x prefix
+        let hex_with_prefix = if !hex_str.starts_with("0x") {
+            format!("0x{}", hex_str)
+        } else {
+            hex_str.to_string()
+        };
+        
+        AccountId::from_hex(&hex_with_prefix)
             .map_err(|e| format!("Invalid hex account_id: {}", e))?
     };
     
-    let secret = Word::try_from(request.secret.as_str())
+    // Parse secret - Word::try_from expects hex with 0x prefix
+    let secret_hex = if request.secret.starts_with("0x") {
+        request.secret.clone()
+    } else {
+        format!("0x{}", request.secret)
+    };
+    
+    let secret = Word::try_from(secret_hex.as_str())
         .map_err(|e| format!("Invalid secret: {}", e))?;
     
     // Rebuild recipient hash to scan for deposits
@@ -426,7 +552,7 @@ fn rocket() -> _ {
             bridge_wallet,
             deposit_tracker: Arc::new(Mutex::new(deposit_tracker)),
         })
-        .mount("/", routes![get_block, health, create_account, create_faucet, generate_hash_endpoint, claim_deposit_endpoint])
+        .mount("/", routes![get_block, health, create_account, create_faucet, options_hash, generate_hash_endpoint, options_claim, claim_deposit_endpoint])
         .attach(
             CorsOptions::default()
                 .allowed_origins(AllowedOrigins::all())
@@ -436,6 +562,11 @@ fn rocket() -> _ {
                         .map(From::from)
                         .collect(),
                 )
+                .allowed_headers(rocket_cors::AllowedHeaders::some(&[
+                    "Authorization",
+                    "Accept",
+                    "Content-Type",
+                ]))
                 .allow_credentials(true)
                 .to_cors()
                 .expect("Failed to create CORS fairing")

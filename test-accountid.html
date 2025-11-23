@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AccountId Test</title>
+</head>
+<body>
+    <h1>AccountId Conversion Test</h1>
+    <div id="output"></div>
+    <script type="module">
+        const output = document.getElementById('output');
+        
+        async function test() {
+            try {
+                const { AccountId, NetworkId } = await import("./node_modules/@demox-labs/miden-sdk/dist/index.js");
+
+                // Test with your bech32
+                const bech32 = "mtst1arqdc9zj0cr3ayzp4y39vnp4qgg26qhs_qruqqypuyph";
+                
+                output.innerHTML += `<p>Testing bech32: ${bech32}</p>`;
+                const fromBech32 = AccountId.fromBech32(bech32);
+                output.innerHTML += `<p>From bech32 inner: ${JSON.stringify(fromBech32.inner)}</p>`;
+                output.innerHTML += `<p>From bech32 toString: ${fromBech32.toString()}</p>`;
+                output.innerHTML += `<p>From bech32 toHex: ${fromBech32.toHex ? fromBech32.toHex() : "toHex not available"}</p>`;
+                
+                // Test with your hex (the padded one)
+                const hex = "0000000000000000000000000000000000c2131bd51cbf8d900327b5cd997ef2";
+                
+                output.innerHTML += `<p><br>Testing hex: ${hex}</p>`;
+                const fromHex = AccountId.fromHex(hex);
+                output.innerHTML += `<p>From hex inner: ${JSON.stringify(fromHex.inner)}</p>`;
+                output.innerHTML += `<p>From hex toBech32: ${fromHex.toBech32(NetworkId.Testnet)}</p>`;
+                output.innerHTML += `<p>From hex toString: ${fromHex.toString()}</p>`;
+                
+                // Do they match?
+                output.innerHTML += `<p><br>Match (inner)? ${fromBech32.inner === fromHex.inner}</p>`;
+                output.innerHTML += `<p>Match (toString)? ${fromBech32.toString() === fromHex.toString()}</p>`;
+                
+                // Try to get the correct hex from bech32
+                output.innerHTML += `<p><br>=== Getting hex from bech32 ===</p>`;
+                if (fromBech32.inner) {
+                    output.innerHTML += `<p>Inner value: ${JSON.stringify(fromBech32.inner)}</p>`;
+                    output.innerHTML += `<p>Inner type: ${typeof fromBech32.inner}</p>`;
+                    output.innerHTML += `<p>Inner string: ${String(fromBech32.inner)}</p>`;
+                }
+                
+                // Check all properties
+                output.innerHTML += `<p><br>=== All properties of fromBech32 ===</p>`;
+                output.innerHTML += `<p>Keys: ${Object.keys(fromBech32).join(', ')}</p>`;
+                
+                // Check console too
+                console.log("From bech32:", fromBech32);
+                console.log("From hex:", fromHex);
+                console.log("Match?", fromBech32.inner === fromHex.inner);
+                
+            } catch (error) {
+                output.innerHTML += `<p style="color: red;">Error: ${error.message}</p>`;
+                console.error("Error:", error);
+            }
+        }
+        
+        test();
+    </script>
+</body>
+</html>
+
