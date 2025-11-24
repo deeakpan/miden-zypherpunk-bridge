@@ -1,12 +1,14 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
+import fs from 'fs';
 
 const execAsync = promisify(exec);
 
 const WALLET_DIR = path.join(process.cwd(), 'wallet', 'personal_wallet');
 const IDENTITY_FILE = path.join(WALLET_DIR, 'key.txt');
 const ZCASH_DEVTOOL_DIR = path.join(process.cwd(), 'wallet', 'zcash-devtool');
+const ZCASH_DEVTOOL_BINARY = path.join(ZCASH_DEVTOOL_DIR, 'target', 'release', 'zcash-devtool.exe');
 
 export interface ZcashCommandResult {
   stdout: string;
@@ -18,10 +20,22 @@ export interface ZcashCommandResult {
 
 export async function execZcashCommand(args: string[]): Promise<ZcashCommandResult> {
   try {
-    const command = `cargo run --release --all-features -- ${args.join(' ')}`;
+    // Use pre-built binary if it exists, otherwise fall back to cargo run
+    let command: string;
+    let cwd: string;
+    
+    if (fs.existsSync(ZCASH_DEVTOOL_BINARY)) {
+      // Binary exists, use it directly (much faster!)
+      command = `"${ZCASH_DEVTOOL_BINARY}" ${args.map(arg => `"${arg}"`).join(' ')}`;
+      cwd = process.cwd();
+    } else {
+      // Binary doesn't exist, use cargo run (slower but works)
+      command = `cargo run --release --all-features -- ${args.join(' ')}`;
+      cwd = ZCASH_DEVTOOL_DIR;
+    }
     
     const { stdout, stderr } = await execAsync(command, {
-      cwd: ZCASH_DEVTOOL_DIR,
+      cwd,
       maxBuffer: 10 * 1024 * 1024, // 10MB buffer
       timeout: 300000, // 5 minute timeout
     });

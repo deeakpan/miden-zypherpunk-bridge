@@ -220,8 +220,6 @@ export default function App() {
             <Link href="/" className="text-sm text-[#FF6B35] font-medium tracking-wide">Bridge</Link>
             <div className="w-px h-5 bg-[#FF6B35]/30" />
             <Link href="/wallet" className="text-sm text-zinc-400 hover:text-[#FF6B35] transition-colors font-medium tracking-wide">Wallet</Link>
-            <div className="w-px h-5 bg-[#FF6B35]/30" />
-            <Link href="/claim" className="text-sm text-zinc-400 hover:text-[#FF6B35] transition-colors font-medium tracking-wide">Claim</Link>
           </nav>
         </div>
       </header>
