@@ -94,13 +94,36 @@ export async function sendTransaction(
   memo?: string,
   accountId?: string
 ): Promise<ZcashCommandResult> {
+  // Convert TAZ to zatoshis (8 decimal places)
+  // Amount is in TAZ format (e.g., "0.2"), need to convert to zatoshis (integer)
+  const amountNum = parseFloat(amount);
+  if (isNaN(amountNum) || amountNum < 0) {
+    return {
+      stdout: '',
+      stderr: 'Invalid amount',
+      success: false,
+      error: 'Invalid amount format',
+    };
+  }
+  
+  // Convert to zatoshis: 1 TAZ = 100,000,000 zatoshis
+  const zatoshis = Math.round(amountNum * 100_000_000);
+  const zatoshisString = zatoshis.toString();
+
+  // Sync wallet first to ensure we have the latest block height (prevents transaction expiry)
+  const syncResult = await syncWallet();
+  if (!syncResult.success) {
+    console.warn('Wallet sync warning:', syncResult.stderr);
+    // Continue anyway - sync might have partial success
+  }
+
   const args = [
     'wallet',
     '-w', WALLET_DIR,
     'send',
     '--identity', IDENTITY_FILE,
     '--address', address,
-    '--value', amount,
+    '--value', zatoshisString,
     '--target-note-count', '1',
     '-s', 'zecrocks',
   ];

@@ -115,6 +115,48 @@ impl BridgeWallet {
         ])
     }
 
+    /// Get memos from incoming transactions (deposits) after enhancing
+    /// This will sync, enhance, and then extract memos from received transactions only
+    pub fn extract_all_memos(&self) -> Result<Vec<(String, String, u64)>, String> {
+        // Step 1: Sync wallet to get latest transactions from chain
+        println!("[Bridge Wallet] Syncing wallet...");
+        self.sync()?;
+        println!("[Bridge Wallet] Sync complete");
+        
+        // Step 2: Enhance transactions to download memo data
+        println!("[Bridge Wallet] Enhancing transactions to get memo data...");
+        self.enhance_transactions()?;
+        println!("[Bridge Wallet] Enhancement complete");
+        
+        // Step 3: List all transactions
+        println!("[Bridge Wallet] Listing transactions...");
+        let tx_output = self.list_transactions(None)?;
+        
+        // Step 4: Parse transactions to extract memos
+        let transactions = self.parse_transactions(&tx_output)?;
+        println!("[Bridge Wallet] Parsed {} transactions", transactions.len());
+        
+        // Extract memos from transactions with memos
+        // Since we're scanning the bridge wallet itself, any transaction with a memo and positive amount
+        // is likely a deposit (the wallet only receives, doesn't send)
+        let mut memos = Vec::new();
+        for tx in transactions {
+            // Process transactions that have a memo and positive amount
+            // For bridge wallet, we assume all transactions with memos are incoming deposits
+            if let Some(memo) = &tx.memo {
+                let memo_trimmed = memo.trim();
+                if !memo_trimmed.is_empty() 
+                    && memo_trimmed != "Empty" 
+                    && !memo_trimmed.starts_with("Memo::Empty")
+                    && tx.amount > 0 {
+                    memos.push((tx.txid.clone(), memo.clone(), tx.amount));
+                }
+            }
+        }
+        
+        Ok(memos)
+    }
+
     /// List transactions
     pub fn list_transactions(&self, account_id: Option<&str>) -> Result<String, String> {
         let wallet_path = self.wallet_dir.to_str()

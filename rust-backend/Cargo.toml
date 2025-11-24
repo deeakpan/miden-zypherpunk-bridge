@@ -2,6 +2,7 @@
 name = "rust-backend"
 version = "0.1.0"
 edition = "2024"
+default-run = "rust-backend"
 
 [[bin]]
 name = "create_account"
@@ -14,6 +15,10 @@ path = "src/bin/setup_faucet.rs"
 [[bin]]
 name = "mint_private_note"
 path = "src/bin/mint_private_note.rs"
+
+[[bin]]
+name = "mint_public_note"
+path = "src/bin/mint_public_note.rs"
 
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
@@ -31,3 +36,4 @@ rand_chacha = "0.9.0"
 rocket = { version = "0.5.1", features = ["json"] }
 rocket_cors = "0.6.0"
 rusqlite = { version = "^0.36", features = ["bundled"] }
+dotenv = "0.15"

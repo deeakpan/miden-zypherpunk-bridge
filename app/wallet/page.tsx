@@ -32,6 +32,7 @@ export default function WalletPage() {
   const [notes, setNotes] = useState<any[]>([]);
   const [consuming, setConsuming] = useState(false);
   const [error, setError] = useState("");
+  const [success, setSuccess] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [midenBalance, setMidenBalance] = useState<string>("0");
   const [loadingBalance, setLoadingBalance] = useState(false);
@@ -201,7 +202,11 @@ export default function WalletPage() {
                   console.log("Balance from vault.getBalance():", balance);
                   if (balance !== null && balance !== undefined) {
                     const balanceNum = typeof balance === 'bigint' ? Number(balance) : Number(balance);
-                    const balanceStr = (balanceNum / 1e8).toFixed(8);
+                    const balanceInTokens = balanceNum / 1e8;
+                    // Remove trailing zeros and unnecessary decimals
+                    const balanceStr = balanceInTokens % 1 === 0 
+                      ? balanceInTokens.toString() 
+                      : balanceInTokens.toFixed(8).replace(/\.?0+$/, '');
                     console.log("Setting balance to:", balanceStr);
                     setMidenBalance(balanceStr);
                     return; // Exit early - we got the balance!
@@ -298,7 +303,11 @@ export default function WalletPage() {
               return sum;
             }
           }, BigInt(0));
-          balance = (Number(total) / 1e8).toFixed(8); // 8 decimals for WTAZ
+          const balanceInTokens = Number(total) / 1e8;
+          // Remove trailing zeros and unnecessary decimals
+          balance = balanceInTokens % 1 === 0 
+            ? balanceInTokens.toString() 
+            : balanceInTokens.toFixed(8).replace(/\.?0+$/, '');
         }
       }
       
@@ -462,9 +471,12 @@ export default function WalletPage() {
         setAccount(updatedAccount);
       }
       
-      alert("Note consumed successfully!");
+      setSuccess("Note consumed successfully! Your balance has been updated.");
       await loadMidenBalance(updatedAccount);
       await scanForNotes(updatedAccount);
+      
+      // Clear success message after 5 seconds
+      setTimeout(() => setSuccess(null), 5000);
     } catch (err: any) {
       setError(`Failed to consume note: ${err.message}`);
       console.error("Consume error:", err);
@@ -889,9 +901,30 @@ export default function WalletPage() {
                       )}
                     </div>
 
+                    {success && (
+                      <div className="mb-6 p-4 bg-green-500/10 border border-green-500/30 rounded-xl">
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm text-green-400">{success}</div>
+                          <button
+                            onClick={() => setSuccess(null)}
+                            className="ml-auto text-green-400 hover:text-green-300"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </div>
+                    )}
                     {error && (
                       <div className="mb-6 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
-                        <div className="text-sm text-red-400">{error}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm text-red-400">{error}</div>
+                          <button
+                            onClick={() => setError("")}
+                            className="ml-auto text-red-400 hover:text-red-300"
+                          >
+                            ×
+                          </button>
+                        </div>
                       </div>
                     )}
                   </>

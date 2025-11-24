@@ -12,7 +12,6 @@ use miden_objects::{
     asset::FungibleAsset,
 };
 use rand::rngs::StdRng;
-use rand;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,30 +32,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         args.get(1)
             .map(|s| s.as_str())
-            .unwrap_or("mtst1aq6csd6v3xkxugq4yspldraezcn6anqz") // Same faucet as public
+            .unwrap_or("mtst1aq6csd6v3xkxugq4yspldraezcn6anqz") // New faucet default
     };
     
     // Get recipient account ID from args
     let recipient_account_id = args.get(2)
         .map(|s| s.as_str())
-        .unwrap_or("mtst1azl5yvzz0gv9aypmjjwrnwnfqc405r84_qruqqypuyph");
+        .unwrap_or("bf4230427a185e903b949c39ba6906");
     
-    // Get amount from args (default 5 WTAZ with 8 decimals)
-    let default_amount = "5".to_string();
+    // Get amount from args (default 3 WTAZ with 8 decimals)
+    let default_amount = "3".to_string();
     let amount_str = args.get(3).map(|s| s.as_str()).unwrap_or(&default_amount);
     let amount: u64 = amount_str.parse()
-        .map_err(|_| "Invalid amount. Use a number like 5 for 5 tokens")?;
+        .map_err(|_| "Invalid amount. Use a number like 3 for 3 tokens")?;
     let mint_amount = amount * 100_000_000u64; // Convert to 8 decimals
     
     let rpc_url = env::var("RPC_URL")
         .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
     
-    println!("🌐 RPC URL: {}", rpc_url);
-    
     let keystore_path = PathBuf::from("./keystore");
     let store_path = PathBuf::from("./faucet_store.sqlite3");
     
-    println!("🚀 Minting private note...");
+    println!("🚀 Minting public note...");
     println!("Faucet ID: {}", faucet_id_str);
     println!("Recipient Account ID: {}", recipient_account_id);
     println!("Amount: {} WTAZ ({} with 8 decimals)", amount, mint_amount);
@@ -71,7 +68,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Failed to create keystore: {}", e))?,
     );
     
-    println!("🔌 Connecting to RPC endpoint: {}", rpc_url);
     let mut client = ClientBuilder::new()
         .rpc(rpc_client)
         .sqlite_store(store_path.clone())
@@ -79,19 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .in_debug_mode(true.into())
         .build()
         .await
-        .map_err(|e| {
-            let error_msg = format!("Failed to build client: {}", e);
-            let error_debug = format!("{:?}", e);
-            println!("❌ RPC Connection Error: {}", error_msg);
-            println!("❌ Error details: {}", error_debug);
-            println!("💡 This is likely a network/RPC issue. Check:");
-            println!("   1. Your internet connection");
-            println!("   2. The RPC endpoint is accessible: {}", rpc_url);
-            println!("   3. The RPC endpoint is not rate-limiting you");
-            println!("   4. Try again in a few moments");
-            error_msg
-        })?;
-    println!("✅ Successfully connected to RPC endpoint");
+        .map_err(|e| format!("Failed to build client: {}", e))?;
     
     // Sync state
     let sync_summary = client.sync_state().await
@@ -115,21 +99,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     // Parse recipient account ID
-    // Note: Rust SDK's bech32 parser doesn't handle underscores
     let recipient_id = if recipient_account_id.starts_with("mtst") || recipient_account_id.starts_with("mm") {
         match AccountId::from_bech32(recipient_account_id) {
             Ok((_, acc_id)) => acc_id,
             Err(e) => {
-                // Bech32 parsing failed (likely due to underscores)
                 eprintln!("\n⚠️  Bech32 parsing failed: {}", e);
-                eprintln!("💡 The Rust SDK doesn't support underscores in bech32 format.");
-                eprintln!("   Please provide the hex format of your account ID instead.");
-                eprintln!("   You can find it in your browser's localStorage: miden_account_id_hex");
-                eprintln!("   Or convert it using the Miden SDK in JavaScript:");
-                eprintln!("   const acc = AccountId.fromBech32('{}');", recipient_account_id);
-                eprintln!("   console.log(acc.toHex());");
-                eprintln!("\n   Then run this script with the hex format:");
-                eprintln!("   cargo run --release --bin mint_private_note {} <hex_account_id>", faucet_id_str);
+                eprintln!("💡 Please provide the hex format of your account ID instead.");
                 return Err(format!("Bech32 format with underscores not supported. Please provide hex format (0x...). Error: {}", e).into());
             }
         }
@@ -154,8 +129,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("Invalid recipient account ID (hex): {}", e))?
     };
     
-    println!("✅ Using faucet account: {}", faucet_id.to_bech32(NetworkId::Testnet));
-    
     // Check if faucet account exists in client
     println!("🔍 Checking if faucet account is in client...");
     match client.get_account(faucet_id).await {
@@ -175,17 +148,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
+    println!("✅ Using faucet account: {}", faucet_id.to_bech32(NetworkId::Testnet));
+    
     // Create asset
     let fungible_asset = FungibleAsset::new(faucet_id, mint_amount)
         .map_err(|e| format!("Failed to create asset: {}", e))?;
     
-    // Use build_mint_fungible_asset with NoteType::Private (same as setup_faucet but private)
-    println!("\n💰 Minting {} WTAZ tokens as a PRIVATE note...", amount);
+    // Mint a PUBLIC note
+    println!("\n💰 Minting {} WTAZ tokens as a PUBLIC note...", amount);
     let transaction_request = TransactionRequestBuilder::new()
         .build_mint_fungible_asset(
             fungible_asset,
             recipient_id,
-            NoteType::Private,  // Private note instead of Public
+            NoteType::Public,  // Public note - recipient can consume easily
             client.rng(),
         )
         .map_err(|e| format!("Failed to build mint transaction: {}", e))?;
@@ -197,19 +172,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .map_err(|e| {
             let error_msg = format!("Failed to submit transaction: {}", e);
-            let error_debug = format!("{:?}", e);
             println!("❌ Error details: {}", error_msg);
-            println!("❌ Error debug: {}", error_debug);
-            
             println!("💡 Make sure:");
             println!("   1. The faucet account exists and is deployed on-chain");
             println!("   2. The faucet key is in the keystore");
             println!("   3. The faucet was created using setup_faucet.rs");
-            println!("   4. The faucet account has been synced to the latest block");
             error_msg
         })?;
     
-    println!("✅ Minted {} WTAZ tokens as PRIVATE note. Transaction ID: {:?}", amount, tx_id);
+    println!("✅ Minted {} WTAZ tokens as PUBLIC note. Transaction ID: {:?}", amount, tx_id);
     
     println!("⏳ Waiting 5 seconds for transaction confirmation...");
     tokio::time::sleep(Duration::from_secs(5)).await;
@@ -222,8 +193,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Recipient Account ID: {}", recipient_id.to_bech32(NetworkId::Testnet));
     println!("Amount: {} WTAZ", amount);
     println!("Transaction ID: {:?}", tx_id);
-    println!("\n💡 This is a PRIVATE note.");
-    println!("   The recipient can consume it by syncing their account.");
+    println!("\n💡 Note: This is a PUBLIC note. The recipient should be able to see and consume it after syncing.");
     
     Ok(())
 }

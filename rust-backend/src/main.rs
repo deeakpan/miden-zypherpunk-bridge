@@ -17,13 +17,13 @@ use miden_objects::{
     Felt,
 };
 use rand::{rngs::StdRng, RngCore, rng};
-use rand::rngs::OsRng;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::http::Status;
 use rocket::response::status;
 use rocket_cors::{AllowedOrigins, CorsOptions};
 use rust_backend::bridge::deposit::{ClaimDepositRequest, ClaimDepositResponse};
+use rust_backend::bridge::relayer::ZcashRelayer;
 use rust_backend::db::deposits::DepositTracker;
 use rust_backend::miden::recipient::build_deposit_recipient;
 use rust_backend::zcash::bridge_wallet::BridgeWallet;
@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::time::Duration;
 use miden_objects::{account::AccountId, Word};
+use rocket::fairing::AdHoc;
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -629,6 +630,38 @@ async fn claim_deposit_endpoint(
 
 #[launch]
 fn rocket() -> _ {
+    // Load .env file from project root (works whether running from root or rust-backend)
+    let current_dir = std::env::current_dir()
+        .expect("Failed to get current directory");
+    
+    // Try to load .env from root directory (go up one level if we're in rust-backend)
+    let env_path = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().join(".env")
+    } else {
+        current_dir.join(".env")
+    };
+    
+    if env_path.exists() {
+        dotenv::from_path(&env_path).ok();
+        println!("Loaded .env from: {:?}", env_path);
+    } else {
+        // Also try .env in current directory
+        dotenv::dotenv().ok();
+    }
+    
+    // Set project_root - if we're in rust-backend, go up one level, otherwise use current dir
+    let project_root = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        current_dir.clone()
+    };
+    
     // Connect to testnet (same as bridge) - can override with RPC_URL env var
     let rpc_url = std::env::var("RPC_URL")
         .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
@@ -647,16 +680,22 @@ fn rocket() -> _ {
             .expect("Failed to create keystore"),
     );
     
-    // Initialize bridge wallet
-    let project_root = std::env::current_dir()
-        .expect("Failed to get current directory");
+    // Initialize bridge wallet (project_root already set above)
     let bridge_wallet = BridgeWallet::new(project_root.clone());
+    let bridge_wallet_arc = Arc::new(BridgeWallet::new(project_root.clone()));
     
     // Initialize deposit tracker database
     let db_path = project_root.join("deposits.db");
     let deposit_tracker = DepositTracker::new(db_path)
         .expect("Failed to initialize deposit tracker database");
     
+    // Start Zcash relayer as background task (will be started on liftoff)
+    let scan_interval = std::env::var("ZCASH_RELAYER_INTERVAL_SECS")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse::<u64>()
+        .unwrap_or(5);
+    
+    println!("[Server] Rocket server starting on http://127.0.0.1:8000");
     rocket::build()
         .manage(State {
             rpc,
@@ -664,6 +703,22 @@ fn rocket() -> _ {
             bridge_wallet,
             deposit_tracker: Arc::new(Mutex::new(deposit_tracker)),
         })
+        .attach(AdHoc::on_liftoff("Zcash Relayer", move |_| {
+            let bridge_wallet_for_relayer = bridge_wallet_arc.clone();
+            let project_root_for_relayer = project_root.clone();
+            let scan_interval_for_relayer = scan_interval;
+            Box::pin(async move {
+                println!("[Server] Starting Zcash relayer in background...");
+                let relayer = ZcashRelayer::new(
+                    bridge_wallet_for_relayer,
+                    project_root_for_relayer,
+                    scan_interval_for_relayer,
+                );
+                tokio::spawn(async move {
+                    relayer.start().await;
+                });
+            })
+        }))
         .mount("/", routes![get_block, health, create_account, create_faucet, mint_from_faucet, options_hash, generate_hash_endpoint, options_claim, claim_deposit_endpoint])
         .attach(
             CorsOptions::default()

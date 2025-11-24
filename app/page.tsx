@@ -5,6 +5,7 @@ import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import LoadingModal from "./components/LoadingModal";
+import ZcashSendModal from "./components/ZcashSendModal";
 
 export default function App() {
   const [fromChain, setFromChain] = useState("Zcash");
@@ -20,6 +21,7 @@ export default function App() {
   const [hashing, setHashing] = useState(false);
   const [accountIdError, setAccountIdError] = useState("");
   const [hashGenerated, setHashGenerated] = useState(false);
+  const [showSendModal, setShowSendModal] = useState(false);
 
   const midenDepositAddress = "utest1s7vrs7ycxvpu379zvtxt0fnc0efseur2f8g2s8puqls7nk45l6p7wvglu3rph9us9qzsjww44ly3wxlsul0jcpqx8qwvwqz4sq48rjj0cn59956sjsrz5ufuswd5ujy89n3vh264wx3843pxscnrf0ulku4990h65h5ll9r0j3q82mjgm2sx7lfnrkfkuqw9l2m7yfmgc4jvzq6n8j2";
 
@@ -154,6 +156,8 @@ export default function App() {
       setHashGenerated(true);
       // Keep modal visible for at least 1 second for visual effect
       await new Promise(resolve => setTimeout(resolve, 1000));
+      // Show send modal after hash is generated
+      setShowSendModal(true);
     } catch (err: any) {
       console.error("Hash error:", err);
       alert(`Failed to generate hash: ${err.message}`);
@@ -298,23 +302,25 @@ export default function App() {
               </div>
             </div>
 
-            {/* Amount */}
-            <div className="mb-5">
-              <label className="block text-xs text-zinc-400 mb-2 uppercase tracking-widest font-semibold">Amount</label>
-              <div className="relative group">
-                <input
-                  type="text"
-                  value={amount}
-                  onChange={(e) => setAmount(e.target.value)}
-                  placeholder="0.00"
-                  className="w-full px-5 py-4 bg-zinc-950/80 border border-zinc-900 rounded-xl text-2xl font-bold focus:outline-none focus:border-[#FF6B35]/50 focus:ring-2 focus:ring-[#FF6B35]/20 transition-all placeholder-zinc-700"
-                />
-                <span className="absolute right-5 top-1/2 -translate-y-1/2 text-sm text-zinc-500 font-semibold">
-                  {fromChain === "Zcash" ? "TAZ" : "wTAZ"}
-                </span>
-                <div className="absolute inset-0 border-2 border-[#FF6B35]/0 rounded-xl group-focus-within:border-[#FF6B35]/30 transition-all pointer-events-none" />
+            {/* Amount - Only show if NOT Zcash to Miden */}
+            {!(fromChain === "Zcash" && toChain === "Miden") && (
+              <div className="mb-5">
+                <label className="block text-xs text-zinc-400 mb-2 uppercase tracking-widest font-semibold">Amount</label>
+                <div className="relative group">
+                  <input
+                    type="text"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                    placeholder="0.00"
+                    className="w-full px-5 py-4 bg-zinc-950/80 border border-zinc-900 rounded-xl text-2xl font-bold focus:outline-none focus:border-[#FF6B35]/50 focus:ring-2 focus:ring-[#FF6B35]/20 transition-all placeholder-zinc-700"
+                  />
+                  <span className="absolute right-5 top-1/2 -translate-y-1/2 text-sm text-zinc-500 font-semibold">
+                    {fromChain === "Zcash" ? "TAZ" : "wTAZ"}
+                  </span>
+                  <div className="absolute inset-0 border-2 border-[#FF6B35]/0 rounded-xl group-focus-within:border-[#FF6B35]/30 transition-all pointer-events-none" />
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Miden Account ID Input (Zcash to Miden) */}
             {fromChain === "Zcash" && toChain === "Miden" && (
@@ -502,6 +508,13 @@ export default function App() {
       </div>
 
       <LoadingModal isOpen={hashing} />
+      <ZcashSendModal
+        isOpen={showSendModal}
+        onClose={() => setShowSendModal(false)}
+        bridgeAddress={midenDepositAddress}
+        memo={recipientHash}
+        secret={secret}
+      />
 
       <style jsx>{`
         @keyframes gridMove {
