@@ -25,7 +25,7 @@ pub const BRIDGE_USECASE: u16 = 14594;
 /// * `sender` - Sender account ID (user's Miden account)
 /// * `note_tag` - Note tag for bridge identification
 pub fn create_zcash_withdrawal_note(
-    secret: Word,
+    _secret: Word,
     output_serial_number: Word,
     dest_chain: Felt,
     zcash_address: [Felt; 3],
@@ -39,10 +39,10 @@ pub fn create_zcash_withdrawal_note(
     let asset = FungibleAsset::new(faucet_id, asset_amount)
         .map_err(|e| NoteError::AddFungibleAssetBalanceError(e))?;
 
-    let assets = NoteAssets::new(vec![asset.into()])?;
+    let _assets = NoteAssets::new(vec![asset.into()])?;
 
     // Create note metadata
-    let metadata = NoteMetadata::new(
+    let _metadata = NoteMetadata::new(
         sender,
         NoteType::Private,
         note_tag,
@@ -58,7 +58,7 @@ pub fn create_zcash_withdrawal_note(
     // - zcash_address (3 felts)
     // - unblock_timestamp
     // - padding zeros for remaining inputs (to match CROSSCHAIN script expectations)
-    let inputs = NoteInputs::new(vec![
+    let _inputs = NoteInputs::new(vec![
         output_serial_number[3],
         output_serial_number[2],
         output_serial_number[1],

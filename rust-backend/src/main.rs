@@ -17,6 +17,7 @@ use miden_objects::{
     Felt,
 };
 use rand::{rngs::StdRng, RngCore, rng};
+use rand::rngs::OsRng;
 use rocket::serde::json::Json;
 use rocket::serde::{Deserialize, Serialize};
 use rocket::http::Status;
@@ -254,7 +255,7 @@ struct MintResponse {
 
 #[post("/faucet/mint", format = "json", data = "<request>")]
 async fn mint_from_faucet(
-    state: &rocket::State<State>,
+    _state: &rocket::State<State>,
     request: Json<MintRequest>,
 ) -> Result<Json<MintResponse>, String> {
     // Parse faucet ID
@@ -302,10 +303,22 @@ async fn mint_from_faucet(
         .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
 
     // Generate a random secret for the note
-    let mut rng = rng();
-    let mut secret_bytes = [0u8; 32];
-    rng.fill_bytes(&mut secret_bytes);
-    let secret = Word::from(secret_bytes);
+    // Generate random bytes synchronously before any await to avoid Send issues
+    // Use a block scope to ensure rng is dropped before await
+    let secret_bytes: [u8; 32] = {
+        let mut rng = rng();
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        bytes
+    };
+    // Convert [u8; 32] to Word (which is [Felt; 4])
+    // Split into 4 chunks of 8 bytes each, convert to u64, then to Felt
+    let secret = Word::new([
+        Felt::new(u64::from_le_bytes(secret_bytes[0..8].try_into().unwrap())),
+        Felt::new(u64::from_le_bytes(secret_bytes[8..16].try_into().unwrap())),
+        Felt::new(u64::from_le_bytes(secret_bytes[16..24].try_into().unwrap())),
+        Felt::new(u64::from_le_bytes(secret_bytes[24..32].try_into().unwrap())),
+    ]);
 
     let (note_id, tx_id) = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();

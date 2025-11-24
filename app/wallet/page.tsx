@@ -165,24 +165,148 @@ export default function WalletPage() {
       if (!acc) return;
       
       await client.syncState();
-      const assets = await client.getAssets(acc);
       
-      // Calculate total balance from all assets
-      let balance = "0";
-      if (assets && Array.isArray(assets)) {
-        const total = assets.reduce((sum: bigint, asset: any) => {
-          try {
-            return sum + BigInt(asset.amount().toString());
-          } catch {
-            return sum;
+      // Get WTAZ faucet ID from env or use the one from setup
+      const { AccountId } = await import("@demox-labs/miden-sdk");
+      const faucetIdHex = process.env.NEXT_PUBLIC_WTAZ_FAUCET_ID || "0x3588374c89ac6e20152403f68fb916";
+      const faucetId = AccountId.fromHex(faucetIdHex);
+      
+      console.log("Loading balance for faucet:", faucetIdHex);
+      
+      // Get account record from client - this should have the vault
+      const accountRecord = await client.getAccount(acc.id());
+      console.log("Account record type:", accountRecord?.constructor?.name);
+      console.log("Account record methods:", accountRecord ? Object.getOwnPropertyNames(Object.getPrototypeOf(accountRecord)) : []);
+      
+      // Get account assets from vault
+      let assets: any[] = [];
+      try {
+        if (accountRecord) {
+          // Try to get vault from account record
+          if (typeof accountRecord.vault === 'function') {
+            const vault = accountRecord.vault();
+            console.log("Vault object:", vault);
+            console.log("Vault methods:", vault ? Object.getOwnPropertyNames(Object.getPrototypeOf(vault)) : []);
+            console.log("Vault properties:", vault ? Object.keys(vault) : []);
+            
+            if (vault) {
+              // Get all methods available on vault
+              const vaultMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(vault));
+              console.log("Vault methods:", vaultMethods);
+              
+              // Use getBalance method with faucet ID - this is the correct way!
+              try {
+                if (typeof vault.getBalance === 'function') {
+                  const balance = vault.getBalance(faucetId); // Note: might be sync, not async
+                  console.log("Balance from vault.getBalance():", balance);
+                  if (balance !== null && balance !== undefined) {
+                    const balanceNum = typeof balance === 'bigint' ? Number(balance) : Number(balance);
+                    const balanceStr = (balanceNum / 1e8).toFixed(8);
+                    console.log("Setting balance to:", balanceStr);
+                    setMidenBalance(balanceStr);
+                    return; // Exit early - we got the balance!
+                  }
+                }
+              } catch (e) {
+                console.error("getBalance failed:", e);
+              }
+              
+              // Try getting all assets
+              try {
+                const methodsToTry = ['getAssets', 'getAll', 'assets', 'get_assets'];
+                for (const methodName of methodsToTry) {
+                  if (typeof vault[methodName] === 'function') {
+                    try {
+                      const result = await vault[methodName]();
+                      console.log(`Assets from ${methodName}():`, result);
+                      if (result && (Array.isArray(result) || result.length !== undefined)) {
+                        assets = Array.isArray(result) ? result : Array.from(result);
+                        if (assets.length > 0) break;
+                      }
+                    } catch (e) {
+                      try {
+                        const result = vault[methodName]();
+                        if (result && (Array.isArray(result) || result.length !== undefined)) {
+                          assets = Array.isArray(result) ? result : Array.from(result);
+                          if (assets.length > 0) break;
+                        }
+                      } catch (e2) {}
+                    }
+                  }
+                }
+              } catch (e: any) {
+                console.error("Error accessing vault methods:", e);
+              }
+            }
           }
-        }, BigInt(0));
-        balance = (Number(total) / 1e8).toFixed(8); // Assuming 8 decimals
+          
+          // Also try direct assets access
+          if ((!assets || assets.length === 0) && accountRecord.assets) {
+            assets = Array.isArray(accountRecord.assets) ? accountRecord.assets : [];
+          }
+        }
+      } catch (e: any) {
+        console.error("Error getting assets from vault:", e);
       }
       
+      console.log("All assets found:", assets);
+      if (assets.length > 0) {
+        console.log("Asset details:", assets.map((a: any) => ({
+          type: a.constructor?.name,
+          methods: Object.getOwnPropertyNames(Object.getPrototypeOf(a)),
+          props: Object.keys(a)
+        })));
+      }
+      
+      // Filter for WTAZ faucet assets and calculate balance
+      let balance = "0";
+      if (assets && Array.isArray(assets) && assets.length > 0) {
+        const wtazAssets = assets.filter((asset: any) => {
+          try {
+            // Try different ways to get the faucet ID from the asset
+            let assetFaucetId: any = null;
+            if (asset.faucetId) {
+              assetFaucetId = typeof asset.faucetId === 'function' ? asset.faucetId() : asset.faucetId;
+            } else if (asset.faucet_id) {
+              assetFaucetId = asset.faucet_id;
+            } else if (asset.origin) {
+              assetFaucetId = asset.origin;
+            }
+            
+            if (assetFaucetId) {
+              const assetIdStr = assetFaucetId.toString ? assetFaucetId.toString() : String(assetFaucetId);
+              const faucetIdStr = faucetId.toString();
+              console.log("Comparing asset faucet:", assetIdStr, "with target:", faucetIdStr);
+              return assetIdStr === faucetIdStr || assetIdStr.includes(faucetIdHex.replace('0x', ''));
+            }
+            return false;
+          } catch (e) {
+            console.error("Error filtering asset:", e);
+            return false;
+          }
+        });
+        
+        console.log("WTAZ assets:", wtazAssets);
+        
+        if (wtazAssets.length > 0) {
+          const total = wtazAssets.reduce((sum: bigint, asset: any) => {
+            try {
+              const amount = asset.amount ? (typeof asset.amount === 'function' ? asset.amount() : asset.amount) : BigInt(0);
+              return sum + BigInt(amount.toString());
+            } catch (e) {
+              console.error("Error getting amount:", e);
+              return sum;
+            }
+          }, BigInt(0));
+          balance = (Number(total) / 1e8).toFixed(8); // 8 decimals for WTAZ
+        }
+      }
+      
+      console.log("Final WTAZ Balance:", balance);
       setMidenBalance(balance);
     } catch (err: any) {
       console.error("Failed to load balance:", err);
+      setError(`Failed to load balance: ${err.message}`);
     } finally {
       setLoadingBalance(false);
     }
@@ -267,25 +391,37 @@ export default function WalletPage() {
       setScanning(true);
       
       const acc = accountObj || account;
-      if (!acc) return;
+      if (!acc) {
+        console.error("No account object available for scanning notes");
+        return;
+      }
       
+      console.log("Syncing state before scanning notes...");
       await client.syncState();
+      
+      console.log("Getting consumable notes for account:", acc.id().toString());
       const consumableNotes = await client.getConsumableNotes(acc.id());
+      console.log(`Found ${consumableNotes.length} consumable note(s)`);
       
       const matchingNotes = [];
       for (const note of consumableNotes) {
         const noteRecord = note.inputNoteRecord();
         const noteId = noteRecord.id().toString();
+        console.log("Note ID:", noteId);
         matchingNotes.push({ id: noteId, note: noteRecord });
       }
       
       setNotes(matchingNotes);
       
       if (matchingNotes.length === 0) {
-        // Don't show error if no notes, just silently continue
+        console.log("No consumable notes found. Make sure:");
+        console.log("1. The note transaction has been confirmed on-chain");
+        console.log("2. You've synced your wallet (click the refresh button)");
+        console.log("3. For private notes, ensure you have the correct account");
       }
     } catch (err: any) {
-      setError(`Failed to scan notes: ${err.message}`);
+      const errorMsg = `Failed to scan notes: ${err.message}`;
+      setError(errorMsg);
       console.error("Scan error:", err);
     } finally {
       setScanning(false);
@@ -293,7 +429,7 @@ export default function WalletPage() {
   };
 
   const consumeNote = async (noteId: string) => {
-    if (!client || !accountId) {
+    if (!client || !accountId || !account) {
       setError("Please connect wallet");
       return;
     }
@@ -302,26 +438,33 @@ export default function WalletPage() {
       setError("");
       setConsuming(true);
       
-      const { AccountId } = await import("@demox-labs/miden-sdk");
-      
-      let account;
-      if (accountId.startsWith('0x')) {
-        const hexStr = accountId.slice(2);
-        account = AccountId.fromHex(hexStr);
-      } else {
-        account = AccountId.fromHex(accountId);
-      }
-      
+      // Use the correct API: submitNewTransaction (not newTransaction + submitTransaction)
       const consumeTxRequest = client.newConsumeTransactionRequest([noteId]);
-      const consumeTx = await client.newTransaction(account, consumeTxRequest);
-      await client.submitTransaction(consumeTx);
+      await client.submitNewTransaction(account.id(), consumeTxRequest);
       
+      // Wait for transaction confirmation
+      console.log("Waiting 5 seconds for transaction confirmation...");
       await new Promise((resolve) => setTimeout(resolve, 5000));
+      
+      // Sync state to update balance
       await client.syncState();
       
+      // Reload account to get fresh state
+      const accounts = await client.getAccounts();
+      const updatedAccount = accounts.find((a: any) => {
+        try {
+          return a.id().toString() === account.toString();
+        } catch {
+          return false;
+        }
+      });
+      if (updatedAccount) {
+        setAccount(updatedAccount);
+      }
+      
       alert("Note consumed successfully!");
-      await loadMidenBalance();
-      await scanForNotes();
+      await loadMidenBalance(updatedAccount);
+      await scanForNotes(updatedAccount);
     } catch (err: any) {
       setError(`Failed to consume note: ${err.message}`);
       console.error("Consume error:", err);
@@ -705,12 +848,21 @@ export default function WalletPage() {
                     <div className="mb-6">
                       <div className="flex items-center justify-between mb-3">
                         <div className="text-xs text-zinc-400 uppercase">Consumable Notes</div>
-                        {scanning && (
-                          <div className="flex items-center gap-2 text-xs text-zinc-500">
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            Scanning...
-                          </div>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {scanning && (
+                            <div className="flex items-center gap-2 text-xs text-zinc-500">
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Scanning...
+                            </div>
+                          )}
+                          <button
+                            onClick={() => scanForNotes()}
+                            disabled={scanning}
+                            className="px-3 py-1.5 text-xs bg-[#FF6B35]/20 hover:bg-[#FF6B35]/30 border border-[#FF6B35]/30 text-[#FF6B35] rounded-lg disabled:opacity-50"
+                          >
+                            {scanning ? "Scanning..." : "Scan Notes"}
+                          </button>
+                        </div>
                       </div>
                       {notes.length > 0 ? (
                         <div className="space-y-3">

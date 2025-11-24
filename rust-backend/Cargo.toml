@@ -11,6 +11,10 @@ path = "src/bin/create_account.rs"
 name = "setup_faucet"
 path = "src/bin/setup_faucet.rs"
 
+[[bin]]
+name = "mint_private_note"
+path = "src/bin/mint_private_note.rs"
+
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
 miden-client-sqlite-store = { version = "0.12" }
