@@ -1,9 +1,10 @@
 "use client";
 
-import { Lock, ArrowUpDown, Sparkles, Copy, Check, Hash, Key, Download } from "lucide-react";
+import { Lock, ArrowUpDown, Sparkles, Copy, Check, Hash, Key, Download, Loader2 } from "lucide-react";
 import { useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
+import LoadingModal from "./components/LoadingModal";
 
 export default function App() {
   const [fromChain, setFromChain] = useState("Zcash");
@@ -18,6 +19,7 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
   const [hashing, setHashing] = useState(false);
   const [accountIdError, setAccountIdError] = useState("");
+  const [hashGenerated, setHashGenerated] = useState(false);
 
   const midenDepositAddress = "utest1s7vrs7ycxvpu379zvtxt0fnc0efseur2f8g2s8puqls7nk45l6p7wvglu3rph9us9qzsjww44ly3wxlsul0jcpqx8qwvwqz4sq48rjj0cn59956sjsrz5ufuswd5ujy89n3vh264wx3843pxscnrf0ulku4990h65h5ll9r0j3q82mjgm2sx7lfnrkfkuqw9l2m7yfmgc4jvzq6n8j2";
 
@@ -149,6 +151,9 @@ export default function App() {
       }
 
       setRecipientHash(data.recipient_hash);
+      setHashGenerated(true);
+      // Keep modal visible for at least 1 second for visual effect
+      await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (err: any) {
       console.error("Hash error:", err);
       alert(`Failed to generate hash: ${err.message}`);
@@ -341,11 +346,25 @@ export default function App() {
                   <div className="mb-6">
                     <button
                       onClick={generateHash}
-                      disabled={hashing}
+                      disabled={hashing || hashGenerated}
                       className="w-full py-4 bg-[#FF6B35] text-black font-bold text-base rounded-xl hover:bg-[#FF6B35]/90 active:scale-[0.98] transition-all shadow-[0_0_40px_rgba(255,107,53,0.4)] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                     >
-                      <Hash className="w-4 h-4" />
-                      {hashing ? "Generating..." : "Generate Hash & Secret"}
+                      {hashing ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Generating...
+                        </>
+                      ) : hashGenerated ? (
+                        <>
+                          <Check className="w-4 h-4" />
+                          Generated
+                        </>
+                      ) : (
+                        <>
+                          <Hash className="w-4 h-4" />
+                          Generate Hash & Secret
+                        </>
+                      )}
                     </button>
                   </div>
                 )}
@@ -360,9 +379,10 @@ export default function App() {
                       <div className="flex-1 relative group">
                         <input
                           type="text"
-                          value={secret}
+                          value={`${secret.slice(0, 16)}...${secret.slice(-8)}`}
                           readOnly
                           className="w-full px-5 py-4 pr-14 bg-zinc-950/80 border border-zinc-900 rounded-xl text-sm font-mono text-zinc-300 focus:outline-none focus:border-[#FF6B35]/50 transition-all"
+                          title={secret}
                         />
                         <button
                           onClick={() => {
@@ -403,8 +423,8 @@ export default function App() {
                       Memo (Recipient Hash)
                     </label>
                     <div className="relative group">
-                      <div className="w-full px-5 py-4 pr-14 bg-zinc-950/80 border border-[#FF6B35]/30 rounded-xl text-sm font-mono text-zinc-300 break-all">
-                        {recipientHash}
+                      <div className="w-full px-5 py-4 pr-14 bg-zinc-950/80 border border-[#FF6B35]/30 rounded-xl text-sm font-mono text-zinc-300 break-all max-h-16 overflow-y-auto">
+                        {recipientHash.length > 50 ? `${recipientHash.slice(0, 30)}...${recipientHash.slice(-20)}` : recipientHash}
                       </div>
                       <button
                         onClick={() => copyToClipboard(recipientHash, setCopiedHash)}
@@ -482,6 +502,8 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      <LoadingModal isOpen={hashing} />
 
       <style jsx>{`
         @keyframes gridMove {
