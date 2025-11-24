@@ -7,6 +7,10 @@ edition = "2024"
 name = "create_account"
 path = "src/bin/create_account.rs"
 
+[[bin]]
+name = "setup_faucet"
+path = "src/bin/setup_faucet.rs"
+
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
 miden-client-sqlite-store = { version = "0.12" }

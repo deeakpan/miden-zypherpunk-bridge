@@ -237,6 +237,105 @@ async fn create_faucet(state: &rocket::State<State>) -> Result<Json<FaucetRespon
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
+struct MintRequest {
+    faucet_id: String,
+    recipient_id: String,
+    amount: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct MintResponse {
+    success: bool,
+    note_id: Option<String>,
+    transaction_id: Option<String>,
+    message: String,
+}
+
+#[post("/faucet/mint", format = "json", data = "<request>")]
+async fn mint_from_faucet(
+    state: &rocket::State<State>,
+    request: Json<MintRequest>,
+) -> Result<Json<MintResponse>, String> {
+    // Parse faucet ID
+    let faucet_id = if request.faucet_id.starts_with("mtst") || request.faucet_id.starts_with("mm") {
+        AccountId::from_bech32(&request.faucet_id)
+            .map_err(|e| format!("Invalid faucet_id bech32: {}", e))?
+            .1
+    } else {
+        let hex_str = if request.faucet_id.starts_with("0x") {
+            &request.faucet_id[2..]
+        } else {
+            &request.faucet_id
+        };
+        let hex_with_prefix = format!("0x{}", hex_str);
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| format!("Invalid faucet_id hex: {}", e))?
+    };
+
+    // Parse recipient ID
+    let recipient_id = if request.recipient_id.starts_with("mtst") || request.recipient_id.starts_with("mm") {
+        AccountId::from_bech32(&request.recipient_id)
+            .map_err(|e| format!("Invalid recipient_id bech32: {}", e))?
+            .1
+    } else {
+        let hex_str = if request.recipient_id.starts_with("0x") {
+            &request.recipient_id[2..]
+        } else {
+            &request.recipient_id
+        };
+        let hex_with_prefix = format!("0x{}", hex_str);
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| format!("Invalid recipient_id hex: {}", e))?
+    };
+
+    // Parse amount
+    let amount = request.amount.parse::<u64>()
+        .map_err(|e| format!("Invalid amount: {}", e))?;
+
+    // Mint note using the bridge deposit mint function
+    let project_root = std::env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let keystore_path = project_root.join("keystore");
+    let store_path = project_root.join("bridge_store.sqlite3");
+    let rpc_url = std::env::var("RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
+
+    // Generate a random secret for the note
+    let mut rng = rng();
+    let mut secret_bytes = [0u8; 32];
+    rng.fill_bytes(&mut secret_bytes);
+    let secret = Word::from(secret_bytes);
+
+    let (note_id, tx_id) = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            rust_backend::bridge::deposit::mint_deposit_note(
+                recipient_id,
+                secret,
+                faucet_id,
+                amount,
+                keystore_path,
+                store_path,
+                &rpc_url,
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(|e| format!("Spawn blocking error: {}", e))?
+    .map_err(|e: String| format!("Mint note error: {}", e))?;
+
+    Ok(Json(MintResponse {
+        success: true,
+        note_id: Some(note_id),
+        transaction_id: Some(tx_id),
+        message: format!("Successfully minted {} tokens to recipient", amount),
+    }))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
 struct HashRequest {
     account_id: String,
     secret: String,
@@ -552,7 +651,7 @@ fn rocket() -> _ {
             bridge_wallet,
             deposit_tracker: Arc::new(Mutex::new(deposit_tracker)),
         })
-        .mount("/", routes![get_block, health, create_account, create_faucet, options_hash, generate_hash_endpoint, options_claim, claim_deposit_endpoint])
+        .mount("/", routes![get_block, health, create_account, create_faucet, mint_from_faucet, options_hash, generate_hash_endpoint, options_claim, claim_deposit_endpoint])
         .attach(
             CorsOptions::default()
                 .allowed_origins(AllowedOrigins::all())

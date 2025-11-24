@@ -24,15 +24,17 @@ export default function WalletPage() {
   const [sendResult, setSendResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Miden wallet state
-  const [secret, setSecret] = useState("");
   const [client, setClient] = useState<any>(null);
   const [connected, setConnected] = useState(false);
   const [accountId, setAccountId] = useState("");
+  const [account, setAccount] = useState<any>(null);
   const [scanning, setScanning] = useState(false);
   const [notes, setNotes] = useState<any[]>([]);
   const [consuming, setConsuming] = useState(false);
   const [error, setError] = useState("");
   const [connecting, setConnecting] = useState(false);
+  const [midenBalance, setMidenBalance] = useState<string>("0");
+  const [loadingBalance, setLoadingBalance] = useState(false);
 
   // Zcash wallet functions - defined before useEffect
   const loadBalance = useCallback(async () => {
@@ -101,23 +103,41 @@ export default function WalletPage() {
       
       if (storedAccountId) {
         setAccountId(storedAccountId);
+        await client.syncState();
+        // Get account object
+        const accounts = await client.getAccounts();
+        const userAccount = accounts.find((acc: any) => {
+          try {
+            return (acc.id() as any).toBech32?.(NetworkId.Testnet) === storedAccountId;
+          } catch {
+            return false;
+          }
+        });
+        if (userAccount) {
+          setAccount(userAccount);
+          // Auto-scan for notes
+          await scanForNotes(userAccount);
+        }
         setConnected(true);
         setConnecting(false);
         return;
       }
       
       await client.syncState();
-      const account = await client.newWallet(AccountStorageMode.private(), true, 0);
+      const newAccount = await client.newWallet(AccountStorageMode.private(), true, 0);
       
-      const accountIdHex = account.id().toString();
+      const accountIdHex = newAccount.id().toString();
       const hexOnly = accountIdHex.startsWith('0x') ? accountIdHex.slice(2) : accountIdHex;
-      const accountIdBech32 = (account.id() as any).toBech32?.(NetworkId.Testnet) || accountIdHex;
+      const accountIdBech32 = (newAccount.id() as any).toBech32?.(NetworkId.Testnet) || accountIdHex;
       
       localStorage.setItem("miden_account_id", accountIdBech32);
       localStorage.setItem("miden_account_id_hex", hexOnly);
       
       setAccountId(accountIdBech32);
+      setAccount(newAccount);
       setConnected(true);
+      // Auto-scan for notes after wallet creation
+      await scanForNotes(newAccount);
     } catch (err: any) {
       console.error("Failed to setup wallet:", err);
       setError(`Failed to setup wallet: ${err.message || String(err)}`);
@@ -134,6 +154,46 @@ export default function WalletPage() {
       loadTransactions();
     }
   }, [walletType, loadBalance, loadAddresses, loadTransactions]);
+
+  // Load Miden balance
+  const loadMidenBalance = useCallback(async (accountObj?: any) => {
+    if (!client || !accountId) return;
+    
+    try {
+      setLoadingBalance(true);
+      const acc = accountObj || account;
+      if (!acc) return;
+      
+      await client.syncState();
+      const assets = await client.getAssets(acc);
+      
+      // Calculate total balance from all assets
+      let balance = "0";
+      if (assets && Array.isArray(assets)) {
+        const total = assets.reduce((sum: bigint, asset: any) => {
+          try {
+            return sum + BigInt(asset.amount().toString());
+          } catch {
+            return sum;
+          }
+        }, BigInt(0));
+        balance = (Number(total) / 1e8).toFixed(8); // Assuming 8 decimals
+      }
+      
+      setMidenBalance(balance);
+    } catch (err: any) {
+      console.error("Failed to load balance:", err);
+    } finally {
+      setLoadingBalance(false);
+    }
+  }, [client, accountId, account]);
+
+  // Load balance when account changes
+  useEffect(() => {
+    if (walletType === "miden" && connected && account) {
+      loadMidenBalance();
+    }
+  }, [walletType, connected, account, loadMidenBalance]);
 
   // Initialize Miden wallet when Miden wallet is selected
   useEffect(() => {
@@ -197,9 +257,8 @@ export default function WalletPage() {
     }
   };
 
-  const scanForNotes = async () => {
-    if (!client || !accountId || !secret) {
-      setError("Please connect wallet and enter secret");
+  const scanForNotes = async (accountObj?: any) => {
+    if (!client || !accountId) {
       return;
     }
 
@@ -207,18 +266,11 @@ export default function WalletPage() {
       setError("");
       setScanning(true);
       
-      const { AccountId } = await import("@demox-labs/miden-sdk");
-      
-      let account;
-      if (accountId.startsWith('0x')) {
-        const hexStr = accountId.slice(2);
-        account = AccountId.fromHex(hexStr);
-      } else {
-        account = AccountId.fromHex(accountId);
-      }
+      const acc = accountObj || account;
+      if (!acc) return;
       
       await client.syncState();
-      const consumableNotes = await client.getConsumableNotes(account);
+      const consumableNotes = await client.getConsumableNotes(acc.id());
       
       const matchingNotes = [];
       for (const note of consumableNotes) {
@@ -230,7 +282,7 @@ export default function WalletPage() {
       setNotes(matchingNotes);
       
       if (matchingNotes.length === 0) {
-        setError("No consumable notes found.");
+        // Don't show error if no notes, just silently continue
       }
     } catch (err: any) {
       setError(`Failed to scan notes: ${err.message}`);
@@ -268,6 +320,7 @@ export default function WalletPage() {
       await client.syncState();
       
       alert("Note consumed successfully!");
+      await loadMidenBalance();
       await scanForNotes();
     } catch (err: any) {
       setError(`Failed to consume note: ${err.message}`);
@@ -612,68 +665,84 @@ export default function WalletPage() {
                 )}
                 
                 {connected && accountId && (
-                  <div className="mb-6 p-4 bg-[#FF6B35]/10 border border-[#FF6B35]/30 rounded-xl">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="flex-1">
-                        <div className="text-xs text-zinc-400 mb-1 uppercase">Your Miden Account</div>
-                        <div className="text-sm font-mono text-[#FF6B35] break-all">{accountId}</div>
-                      </div>
-                      <button
-                        onClick={clearWallet}
-                        className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-red-400 rounded-lg"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="mb-6">
-                  <label className="block text-xs text-zinc-400 mb-2 uppercase">Secret</label>
-                  <input
-                    type="text"
-                    value={secret}
-                    onChange={(e) => setSecret(e.target.value)}
-                    placeholder="Paste your secret here"
-                    className="w-full px-5 py-4 bg-zinc-950/80 border border-zinc-900 rounded-xl text-sm focus:outline-none focus:border-[#FF6B35]/50 font-mono"
-                  />
-                </div>
-
-                <button
-                  onClick={scanForNotes}
-                  disabled={!connected || !secret || scanning}
-                  className="w-full py-4 bg-[#FF6B35] text-black font-bold rounded-xl hover:bg-[#FF6B35]/90 disabled:opacity-50 flex items-center justify-center gap-2"
-                >
-                  {scanning ? <><Loader2 className="w-4 h-4 animate-spin" />Scanning...</> : <><Search className="w-4 h-4" />Scan for Notes</>}
-                </button>
-
-                {error && (
-                  <div className="mt-4 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
-                    <div className="text-sm text-red-400">{error}</div>
-                  </div>
-                )}
-
-                {notes.length > 0 && (
-                  <div className="mt-6">
-                    <div className="text-sm text-zinc-400 mb-3">Found {notes.length} Note(s)</div>
-                    <div className="space-y-3">
-                      {notes.map((note, idx) => (
-                        <div key={idx} className="p-4 bg-zinc-950/80 border border-zinc-900 rounded-xl flex justify-between">
-                          <div>
-                            <div className="text-xs text-zinc-500">Note ID</div>
-                            <div className="text-sm font-mono text-zinc-300">{note.id.slice(0, 20)}...</div>
-                          </div>
-                          <button
-                            onClick={() => consumeNote(note.id)}
-                            disabled={consuming}
-                            className="px-4 py-2 bg-[#FF6B35] text-black font-bold rounded-lg hover:bg-[#FF6B35]/90 disabled:opacity-50"
-                          >
-                            {consuming ? "Consuming..." : "Consume"}
-                          </button>
+                  <>
+                    <div className="mb-6 p-4 bg-[#FF6B35]/10 border border-[#FF6B35]/30 rounded-xl">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="flex-1">
+                          <div className="text-xs text-zinc-400 mb-1 uppercase">Your Miden Account</div>
+                          <div className="text-sm font-mono text-[#FF6B35] break-all">{accountId}</div>
                         </div>
-                      ))}
+                        <button
+                          onClick={clearWallet}
+                          className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-red-400 rounded-lg"
+                        >
+                          Clear
+                        </button>
+                      </div>
                     </div>
-                  </div>
+
+                    {/* Balance Display */}
+                    <div className="mb-6 p-4 bg-zinc-950/80 border border-zinc-900 rounded-xl">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="text-xs text-zinc-400 uppercase">wTAZ Balance</div>
+                        <button
+                          onClick={() => {
+                            loadMidenBalance();
+                            scanForNotes();
+                          }}
+                          disabled={loadingBalance || scanning}
+                          className="p-1 hover:bg-[#FF6B35]/10 rounded transition-colors"
+                        >
+                          <RefreshCw className={`w-3 h-3 text-[#FF6B35] ${(loadingBalance || scanning) ? 'animate-spin' : ''}`} />
+                        </button>
+                      </div>
+                      <div className="text-2xl font-bold text-white">
+                        {loadingBalance ? "..." : `${midenBalance} wTAZ`}
+                      </div>
+                    </div>
+
+                    {/* Notes Section */}
+                    <div className="mb-6">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="text-xs text-zinc-400 uppercase">Consumable Notes</div>
+                        {scanning && (
+                          <div className="flex items-center gap-2 text-xs text-zinc-500">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            Scanning...
+                          </div>
+                        )}
+                      </div>
+                      {notes.length > 0 ? (
+                        <div className="space-y-3">
+                          {notes.map((note, idx) => (
+                            <div key={idx} className="p-4 bg-zinc-950/80 border border-zinc-900 rounded-xl flex justify-between items-center">
+                              <div className="flex-1 min-w-0">
+                                <div className="text-xs text-zinc-500 mb-1">Note ID</div>
+                                <div className="text-sm font-mono text-zinc-300 truncate">{note.id}</div>
+                              </div>
+                              <button
+                                onClick={() => consumeNote(note.id)}
+                                disabled={consuming}
+                                className="ml-4 px-4 py-2 bg-[#FF6B35] text-black font-bold rounded-lg hover:bg-[#FF6B35]/90 disabled:opacity-50 whitespace-nowrap"
+                              >
+                                {consuming ? "Consuming..." : "Consume"}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="p-4 bg-zinc-950/80 border border-zinc-900 rounded-xl text-center text-sm text-zinc-500">
+                          {scanning ? "Scanning for notes..." : "No consumable notes found"}
+                        </div>
+                      )}
+                    </div>
+
+                    {error && (
+                      <div className="mb-6 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
+                        <div className="text-sm text-red-400">{error}</div>
+                      </div>
+                    )}
+                  </>
                 )}
 
                 <div className="flex items-center justify-center gap-2.5 text-xs text-zinc-500 pt-6 mt-6 border-t border-zinc-900">
