@@ -100,6 +100,18 @@ export default function WalletPage() {
       const client = await WebClient.createClient("https://rpc.testnet.miden.io");
       setClient(client);
       
+      // Register bridge note tag (20050) to sync bridge notes
+      try {
+        const { NoteTag } = await import("@demox-labs/miden-sdk");
+        const BRIDGE_USECASE = 20050;
+        const bridgeNoteTag = NoteTag.forLocalUseCase(BRIDGE_USECASE, 0);
+        await client.addNoteTag(bridgeNoteTag);
+        console.log("Registered bridge note tag:", BRIDGE_USECASE);
+      } catch (tagError) {
+        console.warn("Failed to register note tag (non-critical):", tagError);
+        // Continue even if tag registration fails
+      }
+      
       const storedAccountId = localStorage.getItem("miden_account_id");
       
       if (storedAccountId) {
@@ -139,11 +151,12 @@ export default function WalletPage() {
       setConnected(true);
       // Auto-scan for notes after wallet creation
       await scanForNotes(newAccount);
+      setConnecting(false);
     } catch (err: any) {
       console.error("Failed to setup wallet:", err);
       setError(`Failed to setup wallet: ${err.message || String(err)}`);
-    } finally {
       setConnecting(false);
+      setConnected(false);
     }
   }, []);
 
@@ -327,6 +340,16 @@ export default function WalletPage() {
       loadMidenBalance();
     }
   }, [walletType, connected, account, loadMidenBalance]);
+
+  // Load accountId from localStorage on mount
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const storedAccountId = localStorage.getItem("miden_account_id");
+      if (storedAccountId && !accountId) {
+        setAccountId(storedAccountId);
+      }
+    }
+  }, []);
 
   // Initialize Miden wallet when Miden wallet is selected
   useEffect(() => {
@@ -819,22 +842,32 @@ export default function WalletPage() {
                   </div>
                 )}
                 
+                {error && (
+                  <div className="mb-6 p-4 bg-red-500/10 border border-red-500/30 rounded-xl">
+                    <div className="text-sm text-red-400">{error}</div>
+                  </div>
+                )}
+                
+                {/* Show account ID if available (even if not fully connected) */}
+                {accountId && (
+                  <div className="mb-6 p-4 bg-[#FF6B35]/10 border border-[#FF6B35]/30 rounded-xl">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1">
+                        <div className="text-xs text-zinc-400 mb-1 uppercase">Your Miden Account</div>
+                        <div className="text-sm font-mono text-[#FF6B35] break-all">{accountId}</div>
+                      </div>
+                      <button
+                        onClick={clearWallet}
+                        className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-red-400 rounded-lg"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  </div>
+                )}
+                
                 {connected && accountId && (
                   <>
-                    <div className="mb-6 p-4 bg-[#FF6B35]/10 border border-[#FF6B35]/30 rounded-xl">
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1">
-                          <div className="text-xs text-zinc-400 mb-1 uppercase">Your Miden Account</div>
-                          <div className="text-sm font-mono text-[#FF6B35] break-all">{accountId}</div>
-                        </div>
-                        <button
-                          onClick={clearWallet}
-                          className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 border border-red-500/30 text-red-400 rounded-lg"
-                        >
-                          Clear
-                        </button>
-                      </div>
-                    </div>
 
                     {/* Balance Display */}
                     <div className="mb-6 p-4 bg-zinc-950/80 border border-zinc-900 rounded-xl">

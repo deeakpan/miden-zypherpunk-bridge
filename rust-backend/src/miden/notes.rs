@@ -10,7 +10,9 @@ use miden_objects::{
 };
 
 /// NoteTag use case for notes bridged from external chains into Miden
-pub const BRIDGE_USECASE: u16 = 14594;
+/// Using 2005 as our bridge-specific use case identifier (from 20050519, using first 4 digits)
+/// Note: The protocol has a limit smaller than u16 max, so we use a safe value
+pub const BRIDGE_USECASE: u16 = 2005;
 
 /// Create a crosschain note for withdrawing from Miden to Zcash testnet
 /// 
@@ -121,7 +123,7 @@ pub fn reconstruct_deposit_note(
     let metadata = NoteMetadata::new(
         faucet_id,
         NoteType::Private,
-        NoteTag::for_local_use_case(1, 0)
+        NoteTag::for_local_use_case(BRIDGE_USECASE, 0)
             .map_err(|e| NoteError::other(format!("Invalid tag: {:?}", e)))?,
         NoteExecutionHint::always(),
         Felt::ZERO,

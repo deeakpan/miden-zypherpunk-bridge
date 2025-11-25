@@ -124,13 +124,12 @@ export default function App() {
       
       console.log("Sending to backend - account_id:", accountIdForApi, "Length:", accountIdForApi.length);
       
-      const response = await fetch("http://127.0.0.1:8000/deposit/hash", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          account_id: accountIdForApi, // Use hex if available, otherwise use entered format
-          secret: secretToUse,
-        }),
+      // Use Next.js API endpoint (same server, faster)
+      const secretWithPrefix = secretToUse.startsWith("0x") ? secretToUse : `0x${secretToUse}`;
+      const url = `/api/deposit/hash?account_id=${encodeURIComponent(accountIdForApi)}&secret=${encodeURIComponent(secretWithPrefix)}`;
+      
+      const response = await fetch(url, {
+        method: "GET",
       });
 
       let data;

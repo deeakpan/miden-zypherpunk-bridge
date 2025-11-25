@@ -136,20 +136,61 @@ impl BridgeWallet {
         let transactions = self.parse_transactions(&tx_output)?;
         println!("[Bridge Wallet] Parsed {} transactions", transactions.len());
         
-        // Extract memos from transactions with memos
-        // Since we're scanning the bridge wallet itself, any transaction with a memo and positive amount
-        // is likely a deposit (the wallet only receives, doesn't send)
+        // Get bridge wallet addresses to filter for incoming transactions only
+        let bridge_addresses = match self.list_addresses(None) {
+            Ok(addrs) => {
+                let addr_set: std::collections::HashSet<String> = addrs
+                    .into_iter()
+                    .map(|addr| addr.address)
+                    .collect();
+                println!("[Bridge Wallet] Successfully loaded {} bridge addresses: {:?}", addr_set.len(), addr_set);
+                addr_set
+            }
+            Err(e) => {
+                eprintln!("[Bridge Wallet] ⚠️ Failed to list addresses: {}. Will process all transactions with valid memos.", e);
+                // If we can't get addresses, process all transactions with valid memos
+                // This is acceptable for a private chain where only the bridge wallet can see transactions
+                std::collections::HashSet::new()
+            }
+        };
+        
+        // Extract memos from transactions
+        // If bridge_addresses is empty (couldn't load), process all transactions with valid memos
+        // Otherwise, only process transactions sent TO bridge addresses
+        let check_address = !bridge_addresses.is_empty();
+        println!("[Bridge Wallet] Address filtering: {}", if check_address { "enabled" } else { "disabled (processing all valid memos)" });
+        
         let mut memos = Vec::new();
-        for tx in transactions {
-            // Process transactions that have a memo and positive amount
-            // For bridge wallet, we assume all transactions with memos are incoming deposits
+        for tx in &transactions {
+            // Only process transactions that:
+            // 1. Have a memo
+            // 2. Have positive amount (money coming in)
+            // 3. (If addresses loaded) Are sent TO one of the bridge wallet addresses
             if let Some(memo) = &tx.memo {
                 let memo_trimmed = memo.trim();
+                
                 if !memo_trimmed.is_empty() 
                     && memo_trimmed != "Empty" 
                     && !memo_trimmed.starts_with("Memo::Empty")
                     && tx.amount > 0 {
-                    memos.push((tx.txid.clone(), memo.clone(), tx.amount));
+                    
+                    // If we have bridge addresses, check to_address matches
+                    // If we don't have addresses (private chain), process all valid memos
+                    let should_process = if check_address {
+                        if let Some(to_addr) = &tx.to_address {
+                            bridge_addresses.contains(to_addr)
+                        } else {
+                            false
+                        }
+                    } else {
+                        // No address filtering - process all transactions with valid memos
+                        true
+                    };
+                    
+                    if should_process {
+                        println!("[Bridge Wallet] ✅ Processing tx {} with memo: {}", tx.txid, memo_trimmed);
+                        memos.push((tx.txid.clone(), memo.clone(), tx.amount));
+                    }
                 }
             }
         }

@@ -374,12 +374,51 @@ fn options_hash() -> rocket::http::Status {
     rocket::http::Status::Ok
 }
 
+// Simple GET endpoint for fast hash generation (query params instead of JSON body)
+// Rocket requires query params to be optional, so we check them manually
+#[get("/deposit/hash?<account_id>&<secret>")]
+fn get_hash_endpoint(
+    account_id: Option<String>,
+    secret: Option<String>,
+) -> Result<Json<HashResponse>, status::Custom<Json<ErrorResponse>>> {
+    let account_id = account_id.ok_or_else(|| {
+        status::Custom(
+            Status::BadRequest,
+            Json(ErrorResponse {
+                success: false,
+                error: "Missing account_id parameter".to_string(),
+            }),
+        )
+    })?;
+    
+    let secret = secret.ok_or_else(|| {
+        status::Custom(
+            Status::BadRequest,
+            Json(ErrorResponse {
+                success: false,
+                error: "Missing secret parameter".to_string(),
+            }),
+        )
+    })?;
+    
+    generate_hash_internal(&account_id, &secret)
+}
+
 #[post("/deposit/hash", format = "json", data = "<request>")]
 async fn generate_hash_endpoint(
     request: Json<HashRequest>,
 ) -> Result<Json<HashResponse>, status::Custom<Json<ErrorResponse>>> {
-    // Trim whitespace from account_id
-    let account_id_str = request.account_id.trim();
+    generate_hash_internal(&request.account_id, &request.secret)
+}
+
+// Internal function to generate hash (shared by GET and POST endpoints)
+fn generate_hash_internal(
+    account_id_str: &str,
+    secret_str: &str,
+) -> Result<Json<HashResponse>, status::Custom<Json<ErrorResponse>>> {
+    // Trim whitespace from account_id and secret
+    let account_id_str = account_id_str.trim();
+    let secret_str = secret_str.trim();
     
     if account_id_str.is_empty() {
         return Err(status::Custom(
@@ -455,10 +494,10 @@ async fn generate_hash_endpoint(
     };
     
     // Parse secret - Word::try_from expects hex with 0x prefix
-    let secret_hex = if request.secret.starts_with("0x") {
-        request.secret.clone()
+    let secret_hex = if secret_str.starts_with("0x") {
+        secret_str.to_string()
     } else {
-        format!("0x{}", request.secret)
+        format!("0x{}", secret_str)
     };
     
     let secret = Word::try_from(secret_hex.as_str())
@@ -573,21 +612,40 @@ async fn claim_deposit_endpoint(
         "No deposit found with matching recipient hash. Make sure you've sent TAZ to the bridge address with the correct memo.".to_string()
     })?;
     
-    // Get faucet_id from env or use a default
-    let faucet_id_hex = std::env::var("WTAZ_FAUCET_ID")
-        .unwrap_or_else(|_| "0x00000000000000000000000000000000".to_string());
-    let faucet_id = AccountId::from_hex(&faucet_id_hex)
-        .map_err(|e| format!("Invalid faucet_id: {}", e))?;
-    
-    // Claim the deposit by minting note to user's account
-    // Wrap in spawn_blocking to handle Send/Sync issues with Miden client
+    // Get or create faucet automatically (auto-deploy on first deposit)
     let project_root = std::env::current_dir()
         .map_err(|e| format!("Failed to get current directory: {}", e))?;
     let keystore_path = project_root.join("keystore");
     let store_path = project_root.join("bridge_store.sqlite3");
+    let faucet_store_path = project_root.join("faucets.db");
     let rpc_url = std::env::var("RPC_URL")
         .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
     
+    // Get or create faucet (auto-deploy if needed)
+    let faucet_id = tokio::task::spawn_blocking({
+        let keystore_path = keystore_path.clone();
+        let store_path = store_path.clone();
+        let faucet_store_path = faucet_store_path.clone();
+        let rpc_url = rpc_url.clone();
+        move || {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                rust_backend::bridge::deposit::get_or_create_zcash_faucet(
+                    keystore_path,
+                    store_path,
+                    &rpc_url,
+                    faucet_store_path,
+                )
+                .await
+            })
+        }
+    })
+    .await
+    .map_err(|e| format!("Spawn blocking error: {}", e))?
+    .map_err(|e: String| format!("Get or create faucet error: {}", e))?;
+    
+    // Claim the deposit by minting note to user's account
+    // Wrap in spawn_blocking to handle Send/Sync issues with Miden client
     let (note_id, tx_id) = tokio::task::spawn_blocking(move || {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async {
@@ -695,8 +753,15 @@ fn rocket() -> _ {
         .parse::<u64>()
         .unwrap_or(5);
     
-    println!("[Server] Rocket server starting on http://127.0.0.1:8000");
+    // Allow port to be configured via ROCKET_PORT env var, default to 8001
+    let port = std::env::var("ROCKET_PORT")
+        .unwrap_or_else(|_| "8001".to_string())
+        .parse::<u16>()
+        .unwrap_or(8001);
+    
+    println!("[Server] Rocket server starting on http://127.0.0.1:{}", port);
     rocket::build()
+        .configure(rocket::Config::figment().merge(("port", port)))
         .manage(State {
             rpc,
             keystore,
@@ -714,12 +779,19 @@ fn rocket() -> _ {
                     project_root_for_relayer,
                     scan_interval_for_relayer,
                 );
-                tokio::spawn(async move {
-                    relayer.start().await;
+                // Spawn in a separate thread with its own runtime to handle non-Send Miden client types
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create Tokio runtime for relayer");
+                    rt.block_on(async {
+                        relayer.start().await;
+                    });
                 });
             })
         }))
-        .mount("/", routes![get_block, health, create_account, create_faucet, mint_from_faucet, options_hash, generate_hash_endpoint, options_claim, claim_deposit_endpoint])
+        .mount("/", routes![get_block, health, create_account, create_faucet, mint_from_faucet, options_hash, get_hash_endpoint, generate_hash_endpoint, options_claim, claim_deposit_endpoint])
         .attach(
             CorsOptions::default()
                 .allowed_origins(AllowedOrigins::all())
