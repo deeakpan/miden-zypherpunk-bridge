@@ -12,7 +12,7 @@ use miden_client_sqlite_store::ClientBuilderSqliteExt;
 use miden_objects::{
     account::AccountId,
     asset::FungibleAsset,
-    note::{NoteAssets, NoteExecutionHint, NoteMetadata, NoteTag, NoteType},
+    note::{Note, NoteAssets, NoteExecutionHint, NoteMetadata, NoteTag, NoteType},
     FieldElement, Felt, Word,
 };
 use rand::rngs::StdRng;
@@ -170,9 +170,11 @@ pub async fn mint_deposit_note_from_hash(
     .map_err(|e| format!("Failed to create metadata: {}", e))?;
     
     // Create transaction to mint note with recipient hash
+    // Following mono bridge pattern exactly: use recipient_hash.into() to match their code
+    // Note: The mono bridge uses recipient.into() where recipient is Word
     let tx_request = TransactionRequestBuilder::new()
         .own_output_notes(vec![OutputNote::Partial(
-            miden_objects::note::PartialNote::new(metadata, recipient_hash, assets),
+            miden_objects::note::PartialNote::new(metadata, recipient_hash.into(), assets),
         )])
         .build()
         .map_err(|e| format!("Failed to build transaction: {}", e))?;
@@ -271,11 +273,12 @@ pub async fn mint_deposit_note(
     let recipient = build_deposit_recipient(account_id, secret)
         .map_err(|e| format!("Failed to build recipient: {}", e))?;
     
-    // Create transaction to mint note
+    // Create a complete note with full recipient (as per Miden docs)
+    let note = Note::new(assets, metadata, recipient);
+    
+    // Create transaction to mint note using OutputNote::Full (complete note)
     let tx_request = TransactionRequestBuilder::new()
-        .own_output_notes(vec![OutputNote::Partial(
-            miden_objects::note::PartialNote::new(metadata, recipient.digest(), assets),
-        )])
+        .own_output_notes(vec![OutputNote::Full(note)])
         .build()
         .map_err(|e| format!("Failed to build transaction: {}", e))?;
     

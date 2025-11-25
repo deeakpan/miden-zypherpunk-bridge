@@ -1,6 +1,6 @@
-use crate::bridge::deposit::{get_or_create_zcash_faucet, mint_deposit_note_from_hash};
+use crate::bridge::deposit::{get_or_create_zcash_faucet, mint_deposit_note};
 use crate::zcash::bridge_wallet::BridgeWallet;
-use miden_objects::Word;
+use miden_objects::{account::AccountId, Word};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -76,7 +76,7 @@ impl ZcashRelayer {
     }
 
     /// Mint note automatically for a deposit
-    async fn mint_note_for_deposit(&self, recipient_hash: Word, amount: u64) -> Result<(String, String), String> {
+    async fn mint_note_for_deposit(&self, account_id: miden_objects::account::AccountId, secret: Word, amount: u64) -> Result<(String, String), String> {
         let keystore_path = self.project_root.join("keystore");
         let store_path = self.project_root.join("bridge_store.sqlite3");
         let faucet_store_path = self.project_root.join("faucets.db");
@@ -92,9 +92,10 @@ impl ZcashRelayer {
         )
         .await?;
         
-        // Mint note with recipient hash (no account_id needed - just the hash)
-        mint_deposit_note_from_hash(
-            recipient_hash,
+        // Mint note with account_id + secret (builds full recipient)
+        crate::bridge::deposit::mint_deposit_note(
+            account_id,
+            secret,
             faucet_id,
             amount,
             keystore_path,
@@ -132,57 +133,129 @@ impl ZcashRelayer {
                             continue;
                         }
                         
-                        // Extract recipient_hash from memo (remove "Memo::Text(" and ")")
-                        let recipient_hash = memo
+                        // Extract memo content (remove "Memo::Text(" and ")")
+                        let memo_content = memo
                             .trim()
                             .strip_prefix("Memo::Text(\"")
                             .and_then(|s| s.strip_suffix("\")"))
                             .or_else(|| {
-                                // Also handle plain hex without Memo::Text wrapper
-                                if memo.trim().starts_with("0x") {
-                                    Some(memo.trim())
-                                } else {
-                                    None
-                                }
+                                // Also handle plain text without Memo::Text wrapper
+                                Some(memo.trim())
                             })
                             .unwrap_or_else(|| memo.trim());
                         
-                        // Validate recipient hash format: must be 0x + 64 hex chars = 66 chars total
-                        // Example: "0x33de110b5f9b695a98f1539a5f83325602fa559b816990d814224a53eea2f7c5"
-                        if recipient_hash.len() != 66 || !recipient_hash.starts_with("0x") {
-                            println!("[Zcash Relayer] Skipping tx {} - invalid recipient hash format (expected 0x + 64 hex chars, got {} chars): {}", txid, recipient_hash.len(), recipient_hash);
-                            continue;
-                        }
-                        
-                        // Validate it's all hex after 0x
-                        let hex_part = &recipient_hash[2..];
-                        if !hex_part.chars().all(|c| c.is_ascii_hexdigit()) || hex_part.len() != 64 {
-                            println!("[Zcash Relayer] Skipping tx {} - recipient hash is not valid hex (64 chars): {}", txid, recipient_hash);
-                            continue;
-                        }
-                        
-                        // Parse recipient_hash as Word
-                        let recipient_word = match Word::try_from(recipient_hash) {
-                            Ok(word) => word,
-                            Err(e) => {
-                                eprintln!("[Zcash Relayer] Invalid recipient hash in tx {}: {} - {}", txid, recipient_hash, e);
+                        // Check if memo contains account_id|secret format
+                        if let Some(pipe_pos) = memo_content.find('|') {
+                            // Parse account_id|secret format
+                            let account_id_str = &memo_content[..pipe_pos];
+                            let secret_str = &memo_content[pipe_pos + 1..];
+                            
+                            // Validate account_id (should be 30 hex chars = 15 bytes, with or without 0x)
+                            // AccountId::from_hex expects 0x + 30 hex chars = 32 total chars
+                            let account_id_hex = if account_id_str.starts_with("0x") {
+                                &account_id_str[2..]
+                            } else {
+                                account_id_str
+                            };
+                            
+                            if !account_id_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                                println!("[Zcash Relayer] Skipping tx {} - account_id contains non-hex characters: {}", txid, account_id_str);
                                 continue;
                             }
-                        };
-                        
-                        // Store work item for async processing
-                        work_items.push((txid, recipient_hash.to_string(), recipient_word, amount));
+                            
+                            if account_id_hex.len() > 30 {
+                                println!("[Zcash Relayer] Skipping tx {} - account_id too long (max 30 hex chars, got {}): {}", txid, account_id_hex.len(), account_id_str);
+                                continue;
+                            }
+                            
+                            // Pad with leading zeros to 30 chars if needed (AccountId expects 30 hex chars)
+                            let account_id_padded = if account_id_hex.len() < 30 {
+                                format!("{:0>30}", account_id_hex)
+                            } else {
+                                account_id_hex.to_string()
+                            };
+                            
+                            // AccountId::from_hex expects 0x prefix + 30 hex chars
+                            let account_id_for_parse = format!("0x{}", account_id_padded);
+                            
+                            // Validate secret (should be 64 hex chars, with or without 0x)
+                            let secret_hex = if secret_str.starts_with("0x") {
+                                &secret_str[2..]
+                            } else {
+                                secret_str
+                            };
+                            
+                            if secret_hex.len() != 64 || !secret_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                                println!("[Zcash Relayer] Skipping tx {} - invalid secret format (expected 64 hex chars, got {} chars): {}", txid, secret_hex.len(), secret_str);
+                                continue;
+                            }
+                            
+                            // Parse account_id and secret
+                            let account_id = match miden_objects::account::AccountId::from_hex(&account_id_for_parse) {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    eprintln!("[Zcash Relayer] Invalid account_id in tx {}: {} (padded: {}) - {}", txid, account_id_str, account_id_for_parse, e);
+                                    continue;
+                                }
+                            };
+                            
+                            let secret_with_prefix = if secret_str.starts_with("0x") {
+                                secret_str.to_string()
+                            } else {
+                                format!("0x{}", secret_str)
+                            };
+                            let secret_word = match Word::try_from(secret_with_prefix.as_str()) {
+                                Ok(word) => word,
+                                Err(e) => {
+                                    eprintln!("[Zcash Relayer] Invalid secret in tx {}: {} - {}", txid, secret_str, e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Store work item with account_id and secret
+                            work_items.push((txid, account_id, secret_word, amount));
+                        } else {
+                            // Fallback: try to parse as old hash format (for backward compatibility)
+                            let recipient_hash = memo_content;
+                            
+                            // Validate recipient hash format: must be 0x + 64 hex chars = 66 chars total
+                            if recipient_hash.len() != 66 || !recipient_hash.starts_with("0x") {
+                                println!("[Zcash Relayer] Skipping tx {} - invalid memo format (expected account_id|secret or 0x + 64 hex chars, got {} chars): {}", txid, recipient_hash.len(), recipient_hash);
+                                continue;
+                            }
+                            
+                            // Validate it's all hex after 0x
+                            let hex_part = &recipient_hash[2..];
+                            if !hex_part.chars().all(|c| c.is_ascii_hexdigit()) || hex_part.len() != 64 {
+                                println!("[Zcash Relayer] Skipping tx {} - recipient hash is not valid hex (64 chars): {}", txid, recipient_hash);
+                                continue;
+                            }
+                            
+                            // Parse recipient_hash as Word (old format - will fail to mint but won't crash)
+                            let recipient_word = match Word::try_from(recipient_hash) {
+                                Ok(word) => word,
+                                Err(e) => {
+                                    eprintln!("[Zcash Relayer] Invalid recipient hash in tx {}: {} - {}", txid, recipient_hash, e);
+                                    continue;
+                                }
+                            };
+                            
+                            // Store work item with hash (old format - will need to be updated)
+                            println!("[Zcash Relayer] Warning: tx {} uses old hash format. Please use account_id|secret format.", txid);
+                            // For now, skip old format transactions
+                            continue;
+                        }
                     }
                 } // Lock is dropped here
                 
                 // Step 2: Process work items asynchronously (without holding the lock)
                 let mut new_count = 0;
-                for (txid, recipient_hash, recipient_word, amount) in work_items {
-                    println!("[Zcash Relayer] Found new deposit in tx {}: {} (amount: {} zatoshis)", txid, recipient_hash, amount);
-                    
-                    // Automatically mint note with recipient hash
+                for (txid, account_id, secret, amount) in work_items {
+                    println!("[Zcash Relayer] Found new deposit in tx {}: account_id={}, amount={} zatoshis", txid, account_id, amount);
+
+                    // Automatically mint note with account_id + secret
                     println!("[Zcash Relayer] Minting note for deposit tx {}...", txid);
-                    match self.mint_note_for_deposit(recipient_word, amount).await {
+                    match self.mint_note_for_deposit(account_id, secret, amount).await {
                         Ok((note_id, tx_id)) => {
                             // Re-acquire lock to mark as processed
                             {
@@ -191,9 +264,9 @@ impl ZcashRelayer {
                             }
                             new_count += 1;
                             println!("[Zcash Relayer] ✅ Minted note {} (tx: {}) for deposit tx {}", note_id, tx_id, txid);
-                            
+
                             // Also store in memo file for reference
-                            let _ = self.store_memo(&txid, &recipient_hash, amount);
+                            let _ = self.store_memo(&txid, &format!("{}|{}", account_id, secret), amount);
                         }
                         Err(e) => {
                             eprintln!("[Zcash Relayer] ❌ Failed to mint note for tx {}: {}", txid, e);

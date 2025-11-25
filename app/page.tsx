@@ -61,8 +61,8 @@ export default function App() {
     if (!hexRegex.test(hexStr)) {
       return "Invalid hex format";
     }
-    if (hexStr.length !== 64) {
-      return "Hex account ID must be 64 characters (32 bytes)";
+    if (hexStr.length !== 30) {
+      return "Hex account ID must be 30 characters (15 bytes)";
     }
     
     return "";
@@ -511,7 +511,17 @@ export default function App() {
         isOpen={showSendModal}
         onClose={() => setShowSendModal(false)}
         bridgeAddress={midenDepositAddress}
-        memo={recipientHash}
+        memo={(() => {
+          // Use hex account_id if available, otherwise use what user entered
+          if (accountId && secret) {
+            const storedHex = typeof window !== "undefined" ? localStorage.getItem("miden_account_id_hex") : null;
+            const accountIdToUse = storedHex || accountId.trim();
+            // Ensure secret has 0x prefix if it doesn't already
+            const secretToUse = secret.startsWith("0x") ? secret : `0x${secret}`;
+            return `${accountIdToUse}|${secretToUse}`;
+          }
+          return recipientHash;
+        })()}
         secret={secret}
       />
 
