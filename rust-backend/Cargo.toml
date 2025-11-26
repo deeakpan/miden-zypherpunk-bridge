@@ -32,6 +32,10 @@ path = "src/bin/check_consumable_notes.rs"
 name = "consume_note"
 path = "src/bin/consume_note.rs"
 
+[[bin]]
+name = "convert_account_id"
+path = "src/bin/convert_account_id.rs"
+
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
 miden-client-sqlite-store = { version = "0.12" }

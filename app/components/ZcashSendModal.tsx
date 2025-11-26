@@ -9,9 +9,10 @@ interface ZcashSendModalProps {
   bridgeAddress: string;
   memo: string;
   secret: string;
+  accountId: string;
 }
 
-export default function ZcashSendModal({ isOpen, onClose, bridgeAddress, memo, secret }: ZcashSendModalProps) {
+export default function ZcashSendModal({ isOpen, onClose, bridgeAddress, memo, secret, accountId }: ZcashSendModalProps) {
   const [amount, setAmount] = useState("");
   const [balance, setBalance] = useState<string>("0");
   const [loadingBalance, setLoadingBalance] = useState(false);
@@ -93,6 +94,9 @@ export default function ZcashSendModal({ isOpen, onClose, bridgeAddress, memo, s
       const data = await res.json();
       if (data.success) {
         setSendResult({ success: true, message: `Transaction sent! TXID: ${data.txid || "pending"}` });
+        
+        // Generate and download .mno file after successful transaction
+        generateAndDownloadMnoFile(accountId, secret, cleanedAmount);
       } else {
         setSendResult({ success: false, message: data.error || "Failed to send transaction" });
       }
@@ -109,6 +113,46 @@ export default function ZcashSendModal({ isOpen, onClose, bridgeAddress, memo, s
     const a = document.createElement('a');
     a.href = url;
     a.download = 'secret.txt';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const generateAndDownloadMnoFile = (accountId: string, secret: string, amount: string) => {
+    // Get faucet ID from env var
+    const faucetId = process.env.NEXT_PUBLIC_FAUCET_ID || "";
+    
+    if (!faucetId) {
+      console.warn("NEXT_PUBLIC_FAUCET_ID not set, .mno file will not include faucet_id");
+    }
+    
+    // Get account ID hex (prefer stored hex, fallback to accountId)
+    const storedHex = typeof window !== "undefined" ? localStorage.getItem("miden_account_id_hex") : null;
+    const accountIdHex = storedHex || accountId.trim();
+    
+    // Ensure secret has 0x prefix
+    const secretWithPrefix = secret.startsWith("0x") ? secret : `0x${secret}`;
+    
+    // Convert amount to zatoshis (8 decimals)
+    const amountNum = parseFloat(amount);
+    const amountZatoshis = Math.floor(amountNum * 100_000_000);
+    
+    // Create .mno file content (JSON format)
+    const mnoContent = {
+      account_id: accountIdHex,
+      secret: secretWithPrefix,
+      faucet_id: faucetId,
+      amount: amountZatoshis,
+      amount_taz: amount,
+      network: "testnet",
+      created_at: new Date().toISOString(),
+    };
+    
+    // Download as raven.mno
+    const blob = new Blob([JSON.stringify(mnoContent, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'raven.mno';
     a.click();
     URL.revokeObjectURL(url);
   };

@@ -523,6 +523,7 @@ export default function App() {
           return recipientHash;
         })()}
         secret={secret}
+        accountId={accountId}
       />
 
       <style jsx>{`

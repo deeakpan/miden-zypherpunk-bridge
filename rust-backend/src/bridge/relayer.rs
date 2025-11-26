@@ -77,7 +77,8 @@ impl ZcashRelayer {
 
     /// Mint note automatically for a deposit
     async fn mint_note_for_deposit(&self, account_id: miden_objects::account::AccountId, secret: Word, amount: u64) -> Result<(String, String), String> {
-        let keystore_path = self.project_root.join("keystore");
+        // Use rust-backend/keystore (where faucet was created) instead of project_root/keystore
+        let keystore_path = self.project_root.join("rust-backend").join("keystore");
         let store_path = self.project_root.join("bridge_store.sqlite3");
         let faucet_store_path = self.project_root.join("faucets.db");
         let rpc_url = std::env::var("RPC_URL")

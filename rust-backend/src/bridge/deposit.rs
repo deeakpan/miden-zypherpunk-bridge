@@ -248,19 +248,56 @@ pub async fn mint_deposit_note(
         .map_err(|e| format!("Failed to parse RPC endpoint: {}", e))?;
     
     let rpc_client = Arc::new(GrpcClient::new(&endpoint, 10_000));
+    
+    // Check if keystore directory exists
+    if !keystore_path.exists() {
+        return Err(format!(
+            "Keystore directory does not exist: {:?}. The faucet key must be in the keystore.",
+            keystore_path
+        ));
+    }
+    
+    println!("[Bridge] Using keystore path: {:?}", keystore_path);
     let keystore = Arc::new(
-        FilesystemKeyStore::<StdRng>::new(keystore_path)
-            .map_err(|e| format!("Failed to create keystore: {}", e))?,
+        FilesystemKeyStore::<StdRng>::new(keystore_path.clone())
+            .map_err(|e| format!("Failed to create keystore at {:?}: {}", keystore_path, e))?,
     );
     
     let mut client = ClientBuilder::new()
         .rpc(rpc_client)
-        .sqlite_store(store_path)
+        .sqlite_store(store_path.clone())
         .authenticator(keystore.clone())
         .in_debug_mode(true.into())
         .build()
         .await
         .map_err(|e| format!("Failed to build client: {}", e))?;
+    
+    // Sync client state to ensure faucet account is loaded and up-to-date
+    println!("[Bridge] Syncing client state...");
+    client.sync_state().await
+        .map_err(|e| format!("Failed to sync client state: {}", e))?;
+    
+    // Check if faucet account exists in client
+    println!("[Bridge] Checking if faucet account exists in client...");
+    match client.get_account(faucet_id).await {
+        Ok(Some(_)) => {
+            println!("[Bridge] ✅ Faucet account found in client");
+        }
+        Ok(None) => {
+            // Account not in client - try to load it from store
+            // The account should be in the SQLite store if it was created
+            println!("[Bridge] ⚠️  Faucet account not in client, but should be in store");
+            println!("[Bridge] 💡 The account will be loaded when needed, but the key must be in keystore");
+            println!("[Bridge]    Keystore path: {:?}", keystore_path);
+        }
+        Err(e) => {
+            return Err(format!("Failed to check faucet account: {}", e));
+        }
+    }
+    
+    // The key must be in the keystore for the transaction to work
+    // FilesystemKeyStore should auto-load keys from the directory
+    // If the key is missing, the transaction will fail with "missing secret key" error
     
     // Create asset (wTAZ tokens)
     let asset = FungibleAsset::new(faucet_id, amount)
@@ -296,8 +333,9 @@ pub async fn mint_deposit_note(
     
     println!("[Bridge]   Recipient digest: {}", recipient.digest().to_hex());
     
-    // Create a complete note with full recipient (as per Miden docs)
+    // Create a complete note with full recipient (as per test script - uses OutputNote::Full)
     let note = Note::new(assets, metadata, recipient);
+    let note_id = note.id().to_hex();
     
     // Create transaction to mint note using OutputNote::Full (complete note)
     let tx_request = TransactionRequestBuilder::new()
@@ -305,38 +343,24 @@ pub async fn mint_deposit_note(
         .build()
         .map_err(|e| format!("Failed to build transaction: {}", e))?;
     
-    // Execute transaction
-    let tx_result = client
-        .execute_transaction(faucet_id, tx_request)
+    // Submit transaction (like other mint scripts - simpler than execute/prove/submit)
+    println!("[Bridge] Submitting transaction...");
+    let tx_id = client
+        .submit_new_transaction(faucet_id, tx_request)
         .await
-        .map_err(|e| format!("Failed to execute transaction: {}", e))?;
+        .map_err(|e| {
+            let error_msg = format!("Failed to submit transaction: {}", e);
+            let error_debug = format!("{:?}", e);
+            println!("[Bridge] ❌ Transaction submission error: {}", error_msg);
+            println!("[Bridge] ❌ Error details: {}", error_debug);
+            println!("[Bridge] 💡 Make sure:");
+            println!("[Bridge]    1. The faucet account exists and is deployed on-chain");
+            println!("[Bridge]    2. The faucet key is in the keystore");
+            println!("[Bridge]    3. The faucet account has been synced to the latest block");
+            error_msg
+        })?;
     
-    // Prove transaction
-    let proven_tx = client
-        .prove_transaction(&tx_result)
-        .await
-        .map_err(|e| format!("Failed to prove transaction: {}", e))?;
-    
-    // Submit transaction
-    let submission_height = client
-        .submit_proven_transaction(proven_tx, &tx_result)
-        .await
-        .map_err(|e| format!("Failed to submit transaction: {}", e))?;
-    
-    // Apply transaction
-    client
-        .apply_transaction(&tx_result, submission_height)
-        .await
-        .map_err(|e| format!("Failed to apply transaction: {}", e))?;
-    
-    // Get note ID and transaction ID
-    let note_id = tx_result
-        .created_notes()
-        .get_note(0)
-        .id()
-        .to_hex();
-    let tx_id = tx_result.executed_transaction().id().to_hex();
-    
-    Ok((note_id, tx_id))
+    let tx_id_str = format!("{:?}", tx_id);
+    Ok((note_id, tx_id_str))
 }
 

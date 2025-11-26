@@ -139,16 +139,14 @@ export default function WalletPage() {
       await client.syncState();
       const newAccount = await client.newWallet(AccountStorageMode.private(), true, 0);
       
-      // Use toHex() to get full 30-hex-char representation (with leading zeros)
-      // toString() may strip leading zeros, but AccountId needs exactly 30 hex chars
+      // Use toHex() or toString() to get hex representation (as-is, no padding)
       const accountIdHex = (newAccount.id() as any).toHex ? (newAccount.id() as any).toHex() : newAccount.id().toString();
       const hexOnly = accountIdHex.startsWith('0x') ? accountIdHex.slice(2) : accountIdHex;
-      // Ensure it's exactly 30 hex chars (pad if needed, though toHex should already be full)
-      const hexPadded = hexOnly.length < 30 ? hexOnly.padStart(30, '0') : hexOnly;
-      const accountIdBech32 = (newAccount.id() as any).toBech32?.(NetworkId.Testnet) || accountIdHex;
+      // Use toBech32() directly (no fallback) - returns proper bech32 without underscores
+      const accountIdBech32 = newAccount.id().toBech32(NetworkId.Testnet);
       
       localStorage.setItem("miden_account_id", accountIdBech32);
-      localStorage.setItem("miden_account_id_hex", hexPadded);
+      localStorage.setItem("miden_account_id_hex", hexOnly);
       
       setAccountId(accountIdBech32);
       setAccount(newAccount);
@@ -184,9 +182,13 @@ export default function WalletPage() {
       
       await client.syncState();
       
-      // Get WTAZ faucet ID from env or use the one from setup
+      // Get WTAZ faucet ID from env
       const { AccountId } = await import("@demox-labs/miden-sdk");
-      const faucetIdHex = process.env.NEXT_PUBLIC_WTAZ_FAUCET_ID || "0x3588374c89ac6e20152403f68fb916";
+      const faucetIdHex = process.env.NEXT_PUBLIC_FAUCET_ID;
+      if (!faucetIdHex) {
+        console.warn("NEXT_PUBLIC_FAUCET_ID not set, cannot load balance");
+        return;
+      }
       const faucetId = AccountId.fromHex(faucetIdHex);
       
       console.log("Loading balance for faucet:", faucetIdHex);
@@ -439,15 +441,14 @@ export default function WalletPage() {
       const accountIdObj = acc.id();
       const accountIdHex = (accountIdObj as any).toHex ? (accountIdObj as any).toHex() : accountIdObj.toString();
       const accountIdHexOnly = accountIdHex.startsWith('0x') ? accountIdHex.slice(2) : accountIdHex;
-      const accountIdHexPadded = accountIdHexOnly.length < 30 ? accountIdHexOnly.padStart(30, '0') : accountIdHexOnly;
       const { NetworkId } = await import("@demox-labs/miden-sdk");
-      const accountIdBech32 = (accountIdObj as any).toBech32?.(NetworkId.Testnet) || accountIdHex;
+      const accountIdBech32 = accountIdObj.toBech32(NetworkId.Testnet);
       
       console.log("=== Account Info ===");
       console.log("Account ID (toString):", accountIdObj.toString());
       console.log("Account ID (toHex):", accountIdHex);
-      console.log("Account ID (hex only):", accountIdHexOnly);
-      console.log("Account ID (hex padded):", accountIdHexPadded);
+      console.log("Account ID (hex only, no padding):", accountIdHexOnly);
+      console.log("Account ID (hex length):", accountIdHexOnly.length);
       console.log("Account ID (bech32):", accountIdBech32);
       console.log("===================");
       

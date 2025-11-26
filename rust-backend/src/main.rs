@@ -747,6 +747,48 @@ fn rocket() -> _ {
     let deposit_tracker = DepositTracker::new(db_path)
         .expect("Failed to initialize deposit tracker database");
     
+    // Deploy wTAZ faucet on startup if it doesn't exist
+    println!("[Server] Checking for wTAZ faucet...");
+    let keystore_path = PathBuf::from("./keystore");
+    let store_path = project_root.join("bridge_store.sqlite3");
+    let faucet_store_path = project_root.join("faucets.db");
+    let rpc_url_clone = rpc_url.clone();
+    
+    // Deploy faucet synchronously using a new runtime
+    let faucet_result = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async {
+            rust_backend::bridge::deposit::get_or_create_zcash_faucet(
+                keystore_path,
+                store_path,
+                &rpc_url_clone,
+                faucet_store_path,
+            )
+            .await
+        })
+    })
+    .join();
+    
+    match faucet_result {
+        Ok(Ok(faucet_id)) => {
+            let faucet_bech32 = faucet_id.to_bech32(NetworkId::Testnet);
+            use miden_objects::utils::Serializable;
+            let faucet_bytes = faucet_id.to_bytes();
+            let faucet_hex: String = faucet_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            println!("[Server] ✅ wTAZ Faucet ready:");
+            println!("[Server]    Bech32: {}", faucet_bech32);
+            println!("[Server]    Hex:    0x{}", faucet_hex);
+            println!("[Server]    Use this faucet ID for .mno files and UI balance display");
+        }
+        Ok(Err(e)) => {
+            eprintln!("[Server] ⚠️  Failed to deploy faucet: {}", e);
+            eprintln!("[Server]    Faucet will be created on first deposit");
+        }
+        Err(e) => {
+            eprintln!("[Server] ⚠️  Failed to spawn faucet deployment task: {:?}", e);
+        }
+    }
+    
     // Start Zcash relayer as background task (will be started on liftoff)
     let scan_interval = std::env::var("ZCASH_RELAYER_INTERVAL_SECS")
         .unwrap_or_else(|_| "5".to_string())
