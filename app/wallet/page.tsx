@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Wallet, Send, RefreshCw, Copy, Check, ExternalLink, Search, Loader2, Lock } from "lucide-react";
+import { Wallet, Send, RefreshCw, Copy, Check, ExternalLink, Search, Loader2, Lock, Upload, FileText } from "lucide-react";
 import Link from "next/link";
 import { parseTransactions, parseAddresses, zatoshisToZec, zecToZatoshis, ParsedTransaction, ParsedAddress } from "@/lib/parse-wallet";
 
@@ -36,6 +36,8 @@ export default function WalletPage() {
   const [connecting, setConnecting] = useState(false);
   const [midenBalance, setMidenBalance] = useState<string>("0");
   const [loadingBalance, setLoadingBalance] = useState(false);
+  const [uploadingMno, setUploadingMno] = useState(false);
+  const [mnoFile, setMnoFile] = useState<File | null>(null);
 
   // Zcash wallet functions - defined before useEffect
   const loadBalance = useCallback(async () => {
@@ -136,23 +138,56 @@ export default function WalletPage() {
         return;
       }
       
+      // Create wallet via backend (backend stores the key)
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
+      const createResponse = await fetch(`${backendUrl}/account/create`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+      });
+      
+      if (!createResponse.ok) {
+        const errorText = await createResponse.text();
+        throw new Error(`Backend error creating wallet: ${errorText}`);
+      }
+      
+      const accountData = await createResponse.json();
+      console.log("✅ Backend created wallet:");
+      console.log("   Bech32:", accountData.account_id);
+      console.log("   Hex:", accountData.account_id_hex);
+      
+      // Store both formats
+      localStorage.setItem("miden_account_id", accountData.account_id); // bech32
+      // Store hex without 0x prefix for consistency
+      const hexWithoutPrefix = accountData.account_id_hex.startsWith("0x") 
+        ? accountData.account_id_hex.slice(2) 
+        : accountData.account_id_hex;
+      localStorage.setItem("miden_account_id_hex", hexWithoutPrefix); // hex without 0x
+      
+      setAccountId(accountData.account_id);
+      
+      // Sync client state and try to load account (might not be in client store yet)
       await client.syncState();
-      const newAccount = await client.newWallet(AccountStorageMode.private(), true, 0);
       
-      // Use toHex() or toString() to get hex representation (as-is, no padding)
-      const accountIdHex = (newAccount.id() as any).toHex ? (newAccount.id() as any).toHex() : newAccount.id().toString();
-      const hexOnly = accountIdHex.startsWith('0x') ? accountIdHex.slice(2) : accountIdHex;
-      // Use toBech32() directly (no fallback) - returns proper bech32 without underscores
-      const accountIdBech32 = newAccount.id().toBech32(NetworkId.Testnet);
+      // Try to get account from client (might not exist if it's a new wallet)
+      const accounts = await client.getAccounts();
+      const userAccount = accounts.find((acc: any) => {
+        try {
+          return (acc.id() as any).toBech32?.(NetworkId.Testnet) === accountData.account_id;
+        } catch {
+          return false;
+        }
+      });
       
-      localStorage.setItem("miden_account_id", accountIdBech32);
-      localStorage.setItem("miden_account_id_hex", hexOnly);
+      if (userAccount) {
+        setAccount(userAccount);
+        await scanForNotes(userAccount);
+      } else {
+        console.warn("Account not found in client store yet. It will be available after sync.");
+      }
       
-      setAccountId(accountIdBech32);
-      setAccount(newAccount);
       setConnected(true);
-      // Auto-scan for notes after wallet creation
-      await scanForNotes(newAccount);
       setConnecting(false);
     } catch (err: any) {
       console.error("Failed to setup wallet:", err);
@@ -541,6 +576,173 @@ export default function WalletPage() {
     } finally {
       setConsuming(false);
     }
+  };
+
+  const consumeMnoFile = async (file: File) => {
+    if (!client || !accountId) {
+      setError("Please connect wallet first");
+      return;
+    }
+    
+    // Account object is optional - backend handles consumption
+    // Try to load it for balance refresh, but don't require it
+    let accountToUse = account;
+    if (!accountToUse && accountId) {
+      try {
+        await client.syncState();
+        const accounts = await client.getAccounts();
+        accountToUse = accounts.find((acc: any) => {
+          try {
+            return (acc.id() as any).toBech32?.(NetworkId.Testnet) === accountId;
+          } catch {
+            return false;
+          }
+        });
+        if (accountToUse) {
+          setAccount(accountToUse);
+        }
+      } catch (e) {
+        console.warn("Failed to load account from client:", e);
+      }
+    }
+    
+    // Don't require account object - backend handles everything
+    // We'll just skip balance refresh if account is not available
+
+    try {
+      setError("");
+      setUploadingMno(true);
+      
+      // Read and parse .mno file
+      const text = await file.text();
+      const mnoData = JSON.parse(text);
+      
+      console.log("Parsed .mno file:", mnoData);
+      
+      // Validate required fields
+      if (!mnoData.account_id || !mnoData.secret || !mnoData.faucet_id || !mnoData.amount) {
+        throw new Error("Invalid .mno file: missing required fields (account_id, secret, faucet_id, amount)");
+      }
+      
+      // Parse account_id (can be hex with or without 0x, or bech32)
+      let recipientAccountId: any;
+      const accountIdStr = mnoData.account_id.trim();
+      if (accountIdStr.startsWith("mtst") || accountIdStr.startsWith("mm")) {
+        const { AccountId, NetworkId } = await import("@demox-labs/miden-sdk");
+        recipientAccountId = AccountId.fromBech32(accountIdStr, NetworkId.Testnet);
+      } else {
+        const { AccountId } = await import("@demox-labs/miden-sdk");
+        const hexStr = accountIdStr.startsWith("0x") ? accountIdStr : `0x${accountIdStr}`;
+        // Pad to 30 hex chars if needed (15 bytes)
+        const hexOnly = hexStr.slice(2);
+        const paddedHex = hexOnly.length < 30 ? `0x${hexOnly.padStart(30, '0')}` : hexStr;
+        recipientAccountId = AccountId.fromHex(paddedHex);
+      }
+      
+      // Verify the account_id matches the current wallet (for validation only)
+      // Backend will handle the actual consumption
+      const currentAccountIdBech32 = accountId;
+      const mnoAccountId = mnoData.account_id.trim();
+      
+      // Simple check: if both are bech32, compare directly; otherwise backend will validate
+      if (mnoAccountId.startsWith("mtst") && currentAccountIdBech32 && mnoAccountId !== currentAccountIdBech32) {
+        console.warn("⚠️ Note account_id doesn't match current wallet, but proceeding (backend will validate)");
+      }
+      
+      // Call backend to consume the note (backend executes the transaction)
+      console.log("Calling backend to consume note...");
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
+      
+      // Use current account ID (can be bech32 or hex, backend handles both)
+      const accountIdToSend = currentAccountIdBech32 || mnoAccountId;
+      
+      const consumeResponse = await fetch(`${backendUrl}/note/consume`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          account_id: accountIdToSend, // Backend accepts bech32 or hex
+          secret: mnoData.secret,
+          faucet_id: mnoData.faucet_id,
+          amount: mnoData.amount,
+        }),
+      });
+      
+      if (!consumeResponse.ok) {
+        let errorMessage = "Backend error consuming note";
+        try {
+          const errorData = await consumeResponse.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch {
+          // If response is not JSON, try text
+          const errorText = await consumeResponse.text();
+          errorMessage = errorText || errorMessage;
+        }
+        throw new Error(errorMessage);
+      }
+      
+      const consumeData = await consumeResponse.json();
+      console.log("✅ Backend consumed note:");
+      console.log("   Transaction ID:", consumeData.transaction_id);
+      console.log("   Note ID:", consumeData.note_id);
+      
+      // Wait a bit for transaction to be processed
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      
+      // Sync state to update balance
+      if (client) {
+        await client.syncState();
+        
+        // Try to reload account for balance refresh (optional)
+        const accounts = await client.getAccounts();
+        const updatedAccount = accounts.find((a: any) => {
+          try {
+            return (a.id() as any).toBech32?.(NetworkId.Testnet) === accountId;
+          } catch {
+            return false;
+          }
+        });
+        if (updatedAccount) {
+          setAccount(updatedAccount);
+          await loadMidenBalance(updatedAccount);
+          await scanForNotes(updatedAccount);
+        } else {
+          // Account not in client yet, but consumption succeeded
+          // Try to refresh balance using accountId if we have it
+          console.log("Account not in client store yet, but note consumption succeeded");
+          // Balance will be updated on next manual refresh or reconnect
+        }
+      }
+      
+      const amountTaz = mnoData.amount_taz || (Number(mnoData.amount) / 100_000_000).toFixed(8);
+      setSuccess(`Successfully consumed note! Received ${amountTaz} wTAZ. Transaction: ${consumeData.transaction_id}`);
+      
+      // Clear file
+      setMnoFile(null);
+      
+      // Clear success message after 8 seconds
+      setTimeout(() => setSuccess(null), 8000);
+    } catch (err: any) {
+      const errorMsg = `Failed to consume .mno file: ${err.message}`;
+      setError(errorMsg);
+      console.error("MNO consume error:", err);
+    } finally {
+      setUploadingMno(false);
+    }
+  };
+
+  const handleMnoFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    
+    if (!file.name.endsWith('.mno')) {
+      setError("Please upload a .mno file");
+      return;
+    }
+    
+    setMnoFile(file);
+    await consumeMnoFile(file);
   };
 
   const clearWallet = async () => {
@@ -943,6 +1145,49 @@ export default function WalletPage() {
                             {scanning ? "Scanning..." : "Scan Notes"}
                           </button>
                         </div>
+                      </div>
+                      
+                      {/* Upload .mno File Section */}
+                      <div className="mb-4 p-4 bg-zinc-950/80 border border-zinc-900 rounded-xl">
+                        <div className="flex items-center gap-2 mb-2">
+                          <FileText className="w-4 h-4 text-[#FF6B35]" />
+                          <div className="text-xs text-zinc-400 uppercase">Upload .mno File</div>
+                        </div>
+                        <p className="text-xs text-zinc-500 mb-3">
+                          Upload a .mno file to consume a P2ID note (e.g., from bridge deposits)
+                        </p>
+                        <label className="block">
+                          <input
+                            type="file"
+                            accept=".mno"
+                            onChange={handleMnoFileUpload}
+                            disabled={uploadingMno || !connected}
+                            className="hidden"
+                            id="mno-file-input"
+                          />
+                          <button
+                            onClick={() => document.getElementById('mno-file-input')?.click()}
+                            disabled={uploadingMno || !connected}
+                            className="w-full px-4 py-2 bg-[#FF6B35]/10 hover:bg-[#FF6B35]/20 border border-[#FF6B35]/30 text-[#FF6B35] rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 transition-all"
+                          >
+                            {uploadingMno ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                Consuming...
+                              </>
+                            ) : (
+                              <>
+                                <Upload className="w-4 h-4" />
+                                Choose .mno File
+                              </>
+                            )}
+                          </button>
+                        </label>
+                        {mnoFile && (
+                          <div className="mt-2 text-xs text-zinc-400">
+                            Selected: {mnoFile.name}
+                          </div>
+                        )}
                       </div>
                       {notes.length > 0 ? (
                         <div className="space-y-3">

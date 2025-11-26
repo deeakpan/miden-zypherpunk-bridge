@@ -96,7 +96,7 @@ export default function ZcashSendModal({ isOpen, onClose, bridgeAddress, memo, s
         setSendResult({ success: true, message: `Transaction sent! TXID: ${data.txid || "pending"}` });
         
         // Generate and download .mno file after successful transaction
-        generateAndDownloadMnoFile(accountId, secret, cleanedAmount);
+        await generateAndDownloadMnoFile(accountId, secret, cleanedAmount);
       } else {
         setSendResult({ success: false, message: data.error || "Failed to send transaction" });
       }
@@ -117,7 +117,7 @@ export default function ZcashSendModal({ isOpen, onClose, bridgeAddress, memo, s
     URL.revokeObjectURL(url);
   };
 
-  const generateAndDownloadMnoFile = (accountId: string, secret: string, amount: string) => {
+  const generateAndDownloadMnoFile = async (accountId: string, secret: string, amount: string) => {
     // Get faucet ID from env var
     const faucetId = process.env.NEXT_PUBLIC_FAUCET_ID || "";
     
@@ -125,9 +125,39 @@ export default function ZcashSendModal({ isOpen, onClose, bridgeAddress, memo, s
       console.warn("NEXT_PUBLIC_FAUCET_ID not set, .mno file will not include faucet_id");
     }
     
-    // Get account ID hex (prefer stored hex, fallback to accountId)
+    // Get account ID hex - resolve bech32 to hex if needed
+    let accountIdHex: string;
     const storedHex = typeof window !== "undefined" ? localStorage.getItem("miden_account_id_hex") : null;
-    const accountIdHex = storedHex || accountId.trim();
+    
+    if (storedHex) {
+      accountIdHex = storedHex;
+    } else if (accountId.startsWith("mtst") || accountId.startsWith("mm")) {
+      // Bech32 format - resolve to hex via backend or SDK
+      try {
+        const { AccountId, NetworkId } = await import("@demox-labs/miden-sdk");
+        const accountIdObj = AccountId.fromBech32(accountId, NetworkId.Testnet);
+        accountIdHex = (accountIdObj as any).toHex ? (accountIdObj as any).toHex() : accountIdObj.toString();
+        // Remove 0x prefix if present, then add it back consistently
+        if (accountIdHex.startsWith("0x")) {
+          accountIdHex = accountIdHex.slice(2);
+        }
+        // Store for future use
+        if (typeof window !== "undefined") {
+          localStorage.setItem("miden_account_id_hex", accountIdHex);
+        }
+      } catch (e) {
+        console.warn("Failed to resolve bech32 to hex, using as-is:", e);
+        accountIdHex = accountId.trim();
+      }
+    } else {
+      // Already hex format
+      accountIdHex = accountId.trim();
+      if (!accountIdHex.startsWith("0x")) {
+        accountIdHex = `0x${accountIdHex}`;
+      } else {
+        accountIdHex = accountIdHex.slice(2); // Remove 0x for storage
+      }
+    }
     
     // Ensure secret has 0x prefix
     const secretWithPrefix = secret.startsWith("0x") ? secret : `0x${secret}`;

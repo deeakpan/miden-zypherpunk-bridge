@@ -26,6 +26,7 @@ use rust_backend::bridge::deposit::{ClaimDepositRequest, ClaimDepositResponse};
 use rust_backend::bridge::relayer::ZcashRelayer;
 use rust_backend::db::deposits::DepositTracker;
 use rust_backend::miden::recipient::build_deposit_recipient;
+use rust_backend::miden::notes::reconstruct_deposit_note;
 use rust_backend::zcash::bridge_wallet::BridgeWallet;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -44,8 +45,67 @@ struct BlockInfo {
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
 struct AccountResponse {
-    account_id: String,
+    account_id: String, // bech32
+    account_id_hex: String, // hex format
     success: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ReconstructNoteRequest {
+    account_id: String,
+    secret: String,
+    faucet_id: String,
+    amount: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ReconstructNoteResponse {
+    note_id: String,
+    recipient_hash: String,
+    faucet_id: String,
+    amount: u64,
+    success: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct PrepareConsumeRequest {
+    account_id: String,
+    secret: String,
+    faucet_id: String,
+    amount: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct PrepareConsumeResponse {
+    note_id: String,
+    note_commitment: String,
+    recipient_hash: String,
+    faucet_id: String,
+    amount: u64,
+    success: bool,
+    message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ConsumeNoteRequest {
+    account_id: String, // Can be bech32 or hex
+    secret: String,
+    faucet_id: String,
+    amount: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ConsumeNoteResponse {
+    transaction_id: String,
+    note_id: String,
+    success: bool,
+    message: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,11 +135,21 @@ async fn init_client(keystore: Arc<FilesystemKeyStore<StdRng>>) -> Result<miden_
     
     let rpc_client = Arc::new(GrpcClient::new(&endpoint, 10_000));
     
-    // Use absolute path to avoid working directory issues
-    let store_path = std::env::current_dir()
-        .map_err(|e| format!("Failed to get current directory: {}", e))?
-        .join("store.sqlite3");
+    // Use bridge_store.sqlite3 in project root (same as main bridge client)
+    let current_dir = std::env::current_dir()
+        .map_err(|e| format!("Failed to get current directory: {}", e))?;
     
+    // If we're in rust-backend, go up one level to project root
+    let project_root = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        current_dir
+    };
+    
+    let store_path = project_root.join("bridge_store.sqlite3");
     let store_path_display = store_path.clone();
     
     ClientBuilder::new()
@@ -119,8 +189,13 @@ fn health() -> &'static str {
     "OK"
 }
 
+#[options("/account/create")]
+fn options_create_account() -> status::Custom<&'static str> {
+    status::Custom(rocket::http::Status::Ok, "")
+}
+
 #[post("/account/create")]
-async fn create_account(state: &rocket::State<State>) -> Result<Json<AccountResponse>, String> {
+async fn create_account(state: &rocket::State<State>) -> Result<Json<AccountResponse>, status::Custom<Json<serde_json::Value>>> {
     let keystore_clone = state.keystore.clone();
     let keystore_for_key = state.keystore.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -156,18 +231,40 @@ async fn create_account(state: &rocket::State<State>) -> Result<Json<AccountResp
                 .map_err(|e| format!("Failed to add key to keystore: {}", e))?;
             
             let account_id_bech32 = account.id().to_bech32(NetworkId::Testnet);
+            use miden_objects::utils::Serializable;
+            let account_bytes = account.id().to_bytes();
+            let account_id_hex: String = format!("0x{}", account_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>());
             
             Ok(AccountResponse {
                 account_id: account_id_bech32,
+                account_id_hex,
                 success: true,
             })
         })
     })
-    .await
-    .map_err(|e| format!("Spawn blocking error: {}", e))?
-    .map_err(|e: String| format!("Client operation error: {}", e))?;
-
-    Ok(Json(result))
+    .await;
+    
+    let inner_result: Result<AccountResponse, String> = match result {
+        Ok(inner) => inner,
+        Err(e) => {
+            let error_json = serde_json::json!({
+                "success": false,
+                "error": format!("Spawn blocking error: {}", e)
+            });
+            return Err(status::Custom(rocket::http::Status::InternalServerError, Json(error_json)));
+        }
+    };
+    
+    match inner_result {
+        Ok(response) => Ok(Json(response)),
+        Err(e) => {
+            let error_json = serde_json::json!({
+                "success": false,
+                "error": format!("Failed to create account: {}", e)
+            });
+            Err(status::Custom(rocket::http::Status::InternalServerError, Json(error_json)))
+        }
+    }
 }
 
 #[post("/faucet/create")]
@@ -685,6 +782,314 @@ async fn claim_deposit_endpoint(
     }))
 }
 
+#[post("/note/reconstruct", format = "json", data = "<request>")]
+async fn reconstruct_note_endpoint(
+    _state: &rocket::State<State>,
+    request: Json<ReconstructNoteRequest>,
+) -> Result<Json<ReconstructNoteResponse>, String> {
+    // Parse account_id
+    let account_id = if request.account_id.starts_with("mtst") || request.account_id.starts_with("mm") {
+        let (_, acc_id) = AccountId::from_bech32(&request.account_id)
+            .map_err(|e| format!("Invalid bech32 account_id: {}", e))?;
+        acc_id
+    } else {
+        let hex_str = if request.account_id.starts_with("0x") {
+            &request.account_id[2..]
+        } else {
+            &request.account_id
+        };
+        let hex_with_prefix = format!("0x{}", hex_str);
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| format!("Failed to parse account_id: {}", e))?
+    };
+    
+    // Parse secret
+    let secret_hex = if request.secret.starts_with("0x") {
+        request.secret.clone()
+    } else {
+        format!("0x{}", request.secret)
+    };
+    let secret = Word::try_from(secret_hex.as_str())
+        .map_err(|e| format!("Failed to parse secret: {}", e))?;
+    
+    // Parse faucet_id
+    let faucet_id = if request.faucet_id.starts_with("mtst") || request.faucet_id.starts_with("mm") {
+        let (_, fid) = AccountId::from_bech32(&request.faucet_id)
+            .map_err(|e| format!("Invalid bech32 faucet_id: {}", e))?;
+        fid
+    } else {
+        let hex_str = if request.faucet_id.starts_with("0x") {
+            &request.faucet_id[2..]
+        } else {
+            &request.faucet_id
+        };
+        let hex_with_prefix = format!("0x{}", hex_str);
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| format!("Failed to parse faucet_id: {}", e))?
+    };
+    
+    // Reconstruct the note
+    let note = reconstruct_deposit_note(account_id, secret, faucet_id, request.amount)
+        .map_err(|e| format!("Failed to reconstruct note: {:?}", e))?;
+    
+    // Get note ID and recipient hash
+    let note_id = note.id().to_hex();
+    let recipient = build_deposit_recipient(account_id, secret)
+        .map_err(|e| format!("Failed to build recipient: {:?}", e))?;
+    let recipient_hash = recipient.digest().to_hex();
+    
+    Ok(Json(ReconstructNoteResponse {
+        note_id,
+        recipient_hash,
+        faucet_id: request.faucet_id.clone(),
+        amount: request.amount,
+        success: true,
+    }))
+}
+
+#[post("/note/consume", format = "json", data = "<request>")]
+async fn consume_note_endpoint(
+    _state: &rocket::State<State>,
+    request: Json<ConsumeNoteRequest>,
+) -> Result<Json<ConsumeNoteResponse>, status::Custom<Json<ErrorResponse>>> {
+    // Parse account_id (accepts both bech32 and hex)
+    let account_id = if request.account_id.starts_with("mtst") || request.account_id.starts_with("mm") {
+        let (_, acc_id) = AccountId::from_bech32(&request.account_id)
+            .map_err(|e| {
+                status::Custom(
+                    Status::BadRequest,
+                    Json(ErrorResponse {
+                        success: false,
+                        error: format!("Invalid bech32 account_id: {}", e),
+                    }),
+                )
+            })?;
+        acc_id
+    } else {
+        let hex_str = if request.account_id.starts_with("0x") {
+            &request.account_id[2..]
+        } else {
+            &request.account_id
+        };
+        let hex_with_prefix = format!("0x{}", hex_str);
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| {
+                status::Custom(
+                    Status::BadRequest,
+                    Json(ErrorResponse {
+                        success: false,
+                        error: format!("Failed to parse account_id: {}", e),
+                    }),
+                )
+            })?
+    };
+    
+    // Parse secret
+    let secret_hex = if request.secret.starts_with("0x") {
+        request.secret.clone()
+    } else {
+        format!("0x{}", request.secret)
+    };
+    let secret = Word::try_from(secret_hex.as_str())
+        .map_err(|e| {
+            status::Custom(
+                Status::BadRequest,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to parse secret: {}", e),
+                }),
+            )
+        })?;
+    
+    // Parse faucet_id
+    let faucet_id = if request.faucet_id.starts_with("mtst") || request.faucet_id.starts_with("mm") {
+        let (_, fid) = AccountId::from_bech32(&request.faucet_id)
+            .map_err(|e| {
+                status::Custom(
+                    Status::BadRequest,
+                    Json(ErrorResponse {
+                        success: false,
+                        error: format!("Invalid bech32 faucet_id: {}", e),
+                    }),
+                )
+            })?;
+        fid
+    } else {
+        let hex_str = if request.faucet_id.starts_with("0x") {
+            &request.faucet_id[2..]
+        } else {
+            &request.faucet_id
+        };
+        let hex_with_prefix = format!("0x{}", hex_str);
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| {
+                status::Custom(
+                    Status::BadRequest,
+                    Json(ErrorResponse {
+                        success: false,
+                        error: format!("Failed to parse faucet_id: {}", e),
+                    }),
+                )
+            })?
+    };
+    
+    // Setup paths (same logic as init_client)
+    let current_dir = std::env::current_dir()
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to get current directory: {}", e),
+                }),
+            )
+        })?;
+    
+    // If we're in rust-backend, go up one level to project root
+    let project_root = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        current_dir
+    };
+    
+    let keystore_path = project_root.join("rust-backend").join("keystore");
+    let store_path = project_root.join("bridge_store.sqlite3");
+    let rpc_url = std::env::var("RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
+    
+    // Execute consumption transaction
+    let (tx_id, note_id) = tokio::task::spawn_blocking({
+        let keystore_path = keystore_path.clone();
+        let store_path = store_path.clone();
+        let rpc_url = rpc_url.clone();
+        move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+            rt.block_on(async {
+                consume_deposit_note(
+                    account_id,
+                    secret,
+                    faucet_id,
+                    request.amount,
+                    keystore_path,
+                    store_path,
+                    &rpc_url,
+                )
+                .await
+            })
+        }
+    })
+    .await
+    .map_err(|e| {
+        status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Spawn blocking error: {}", e),
+            }),
+        )
+    })?
+    .map_err(|e: String| {
+        status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Consume note error: {}", e),
+            }),
+        )
+    })?;
+    
+    Ok(Json(ConsumeNoteResponse {
+        transaction_id: tx_id,
+        note_id,
+        success: true,
+        message: "Note consumed successfully!".to_string(),
+    }))
+}
+
+// Helper function to consume a deposit note (extracted from consume_note.rs pattern)
+async fn consume_deposit_note(
+    account_id: AccountId,
+    secret: Word,
+    faucet_id: AccountId,
+    amount: u64,
+    keystore_path: PathBuf,
+    store_path: PathBuf,
+    rpc_url: &str,
+) -> Result<(String, String), String> {
+    use miden_client::transaction::TransactionRequestBuilder;
+    use miden_objects::note::NoteTag;
+    
+    // Initialize Miden client
+    let endpoint = Endpoint::try_from(rpc_url)
+        .map_err(|e| format!("Failed to parse RPC endpoint: {}", e))?;
+    
+    let rpc_client = Arc::new(GrpcClient::new(&endpoint, 10_000));
+    
+    if !keystore_path.exists() {
+        return Err(format!("Keystore directory does not exist: {:?}", keystore_path));
+    }
+    
+    let keystore = Arc::new(
+        FilesystemKeyStore::<StdRng>::new(keystore_path.clone())
+            .map_err(|e| format!("Failed to create keystore at {:?}: {}", keystore_path, e))?,
+    );
+    
+    let mut client = ClientBuilder::new()
+        .rpc(rpc_client)
+        .sqlite_store(store_path)
+        .authenticator(keystore)
+        .in_debug_mode(true.into())
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build client: {}", e))?;
+    
+    // Add bridge note tag
+    use rust_backend::miden::notes::BRIDGE_USECASE;
+    client.add_note_tag(NoteTag::for_local_use_case(BRIDGE_USECASE, 0).expect("Bridge use case tag should be valid"))
+        .await
+        .map_err(|e| format!("Failed to add note tag: {}", e))?;
+    
+    // Sync state
+    client.sync_state().await
+        .map_err(|e| format!("Failed to sync client state: {}", e))?;
+    
+    // Check if account exists
+    let wallet_account = client.get_account(account_id).await
+        .map_err(|e| format!("Failed to get account: {}", e))?;
+    
+    if wallet_account.is_none() {
+        return Err(format!(
+            "Account {} not found in client store. The account must be created and added to the client first.",
+            account_id.to_bech32(miden_objects::address::NetworkId::Testnet)
+        ));
+    }
+    
+    // Reconstruct the note
+    let note = reconstruct_deposit_note(account_id, secret, faucet_id, amount)
+        .map_err(|e| format!("Failed to reconstruct note: {:?}", e))?;
+    
+    // Get note ID before moving the note
+    let note_id_hex = note.id().to_hex();
+    
+    // Build consume transaction using unauthenticated_input_notes
+    let secret_word: miden_objects::Word = secret;
+    let tx_request = TransactionRequestBuilder::new()
+        .unauthenticated_input_notes([(note, Some(secret_word.into()))])
+        .build()
+        .map_err(|e| format!("Failed to build transaction: {:?}", e))?;
+    
+    // Submit transaction
+    let tx_id = client
+        .submit_new_transaction(account_id, tx_request)
+        .await
+        .map_err(|e| format!("Failed to submit transaction: {}", e))?;
+    
+    let tx_id_hex = tx_id.to_hex();
+    Ok((tx_id_hex, note_id_hex))
+}
 
 #[launch]
 fn rocket() -> _ {
@@ -833,7 +1238,7 @@ fn rocket() -> _ {
                 });
             })
         }))
-        .mount("/", routes![get_block, health, create_account, create_faucet, mint_from_faucet, options_hash, get_hash_endpoint, generate_hash_endpoint, options_claim, claim_deposit_endpoint])
+        .mount("/", routes![get_block, health, options_create_account, create_account, create_faucet, mint_from_faucet, options_hash, get_hash_endpoint, generate_hash_endpoint, options_claim, claim_deposit_endpoint, reconstruct_note_endpoint, consume_note_endpoint])
         .attach(
             CorsOptions::default()
                 .allowed_origins(AllowedOrigins::all())
