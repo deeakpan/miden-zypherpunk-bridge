@@ -100,10 +100,10 @@ export default function WalletPage() {
       const client = await WebClient.createClient("https://rpc.testnet.miden.io");
       setClient(client);
       
-      // Register bridge note tag (20050) to sync bridge notes
+      // Register bridge note tag (2005) to sync bridge notes
       try {
         const { NoteTag } = await import("@demox-labs/miden-sdk");
-        const BRIDGE_USECASE = 20050;
+        const BRIDGE_USECASE = 2005;
         const bridgeNoteTag = NoteTag.forLocalUseCase(BRIDGE_USECASE, 0);
         await client.addNoteTag(bridgeNoteTag);
         console.log("Registered bridge note tag:", BRIDGE_USECASE);
@@ -139,12 +139,16 @@ export default function WalletPage() {
       await client.syncState();
       const newAccount = await client.newWallet(AccountStorageMode.private(), true, 0);
       
-      const accountIdHex = newAccount.id().toString();
+      // Use toHex() to get full 30-hex-char representation (with leading zeros)
+      // toString() may strip leading zeros, but AccountId needs exactly 30 hex chars
+      const accountIdHex = (newAccount.id() as any).toHex ? (newAccount.id() as any).toHex() : newAccount.id().toString();
       const hexOnly = accountIdHex.startsWith('0x') ? accountIdHex.slice(2) : accountIdHex;
+      // Ensure it's exactly 30 hex chars (pad if needed, though toHex should already be full)
+      const hexPadded = hexOnly.length < 30 ? hexOnly.padStart(30, '0') : hexOnly;
       const accountIdBech32 = (newAccount.id() as any).toBech32?.(NetworkId.Testnet) || accountIdHex;
       
       localStorage.setItem("miden_account_id", accountIdBech32);
-      localStorage.setItem("miden_account_id_hex", hexOnly);
+      localStorage.setItem("miden_account_id_hex", hexPadded);
       
       setAccountId(accountIdBech32);
       setAccount(newAccount);
@@ -431,9 +435,39 @@ export default function WalletPage() {
       console.log("Syncing state before scanning notes...");
       await client.syncState();
       
+      // Log account info for debugging
+      const accountIdObj = acc.id();
+      const accountIdHex = (accountIdObj as any).toHex ? (accountIdObj as any).toHex() : accountIdObj.toString();
+      const accountIdHexOnly = accountIdHex.startsWith('0x') ? accountIdHex.slice(2) : accountIdHex;
+      const accountIdHexPadded = accountIdHexOnly.length < 30 ? accountIdHexOnly.padStart(30, '0') : accountIdHexOnly;
+      const { NetworkId } = await import("@demox-labs/miden-sdk");
+      const accountIdBech32 = (accountIdObj as any).toBech32?.(NetworkId.Testnet) || accountIdHex;
+      
+      console.log("=== Account Info ===");
+      console.log("Account ID (toString):", accountIdObj.toString());
+      console.log("Account ID (toHex):", accountIdHex);
+      console.log("Account ID (hex only):", accountIdHexOnly);
+      console.log("Account ID (hex padded):", accountIdHexPadded);
+      console.log("Account ID (bech32):", accountIdBech32);
+      console.log("===================");
+      
       console.log("Getting consumable notes for account:", acc.id().toString());
       const consumableNotes = await client.getConsumableNotes(acc.id());
       console.log(`Found ${consumableNotes.length} consumable note(s)`);
+      
+      // Log note details for debugging
+      for (const note of consumableNotes) {
+        const noteRecord = note.inputNoteRecord();
+        const noteId = noteRecord.id().toString();
+        console.log("Note ID:", noteId);
+        // Try to get note tag if available
+        try {
+          const noteTag = (noteRecord as any).metadata?.tag;
+          console.log("  Note tag:", noteTag);
+        } catch (e) {
+          // Ignore if tag not accessible
+        }
+      }
       
       const matchingNotes = [];
       for (const note of consumableNotes) {

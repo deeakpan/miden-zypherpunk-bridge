@@ -16,6 +16,22 @@ path = "src/bin/mint_private_note.rs"
 name = "mint_public_note"
 path = "src/bin/mint_public_note.rs"
 
+[[bin]]
+name = "test_account_format"
+path = "src/bin/test_account_format.rs"
+
+[[bin]]
+name = "test_mono_bridge_pattern"
+path = "src/bin/test_mono_bridge_pattern.rs"
+
+[[bin]]
+name = "check_consumable_notes"
+path = "src/bin/check_consumable_notes.rs"
+
+[[bin]]
+name = "consume_note"
+path = "src/bin/consume_note.rs"
+
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
 miden-client-sqlite-store = { version = "0.12" }

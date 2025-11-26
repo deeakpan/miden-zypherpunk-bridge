@@ -111,11 +111,24 @@ pub async fn get_or_create_zcash_faucet(
         .map_err(|e| format!("Failed to parse faucet_id: {}", e))?
         .1;
     
+    // Get hex representation for logging
+    use miden_objects::utils::Serializable;
+    let faucet_bytes = faucet_id.to_bytes();
+    let faucet_hex: String = faucet_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let faucet_hex_padded = if faucet_hex.len() < 30 {
+        format!("{:0>30}", faucet_hex)
+    } else {
+        faucet_hex
+    };
+    
     // Store faucet_id in database
     faucet_store.store_faucet_id(ZCASH_ORIGIN_NETWORK, &faucet_id)
         .map_err(|e| format!("Failed to store faucet_id: {}", e))?;
     
-    println!("[Bridge] Created and stored faucet: {}", faucet_id_bech32);
+    println!("[Bridge] ✅ Created and stored Zcash testnet faucet:");
+    println!("[Bridge]    Bech32: {}", faucet_id_bech32);
+    println!("[Bridge]    Hex:    0x{}", faucet_hex_padded);
+    println!("[Bridge]    Database: faucets.db");
     Ok(faucet_id)
 }
 
@@ -270,8 +283,18 @@ pub async fn mint_deposit_note(
     .map_err(|e| format!("Failed to create metadata: {}", e))?;
     
     // Build recipient - P2ID note (requires account_id + secret)
+    // Log account_id for debugging
+    use miden_objects::utils::Serializable;
+    let account_bytes = account_id.to_bytes();
+    let account_hex: String = account_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    println!("[Bridge] Minting note for account_id:");
+    println!("[Bridge]   Hex: 0x{}", account_hex);
+    println!("[Bridge]   Bech32: {}", account_id.to_bech32(miden_objects::address::NetworkId::Testnet));
+    
     let recipient = build_deposit_recipient(account_id, secret)
         .map_err(|e| format!("Failed to build recipient: {}", e))?;
+    
+    println!("[Bridge]   Recipient digest: {}", recipient.digest().to_hex());
     
     // Create a complete note with full recipient (as per Miden docs)
     let note = Note::new(assets, metadata, recipient);

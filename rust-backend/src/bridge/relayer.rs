@@ -1,6 +1,6 @@
-use crate::bridge::deposit::{get_or_create_zcash_faucet, mint_deposit_note};
+use crate::bridge::deposit::get_or_create_zcash_faucet;
 use crate::zcash::bridge_wallet::BridgeWallet;
-use miden_objects::{account::AccountId, Word};
+use miden_objects::Word;
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -83,8 +83,8 @@ impl ZcashRelayer {
         let rpc_url = std::env::var("RPC_URL")
             .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
         
-        // Get or create faucet
-        let faucet_id = get_or_create_zcash_faucet(
+            // Get or create faucet (will log address on first creation)
+            let faucet_id = get_or_create_zcash_faucet(
             keystore_path.clone(),
             store_path.clone(),
             &rpc_url,
@@ -232,7 +232,7 @@ impl ZcashRelayer {
                             }
                             
                             // Parse recipient_hash as Word (old format - will fail to mint but won't crash)
-                            let recipient_word = match Word::try_from(recipient_hash) {
+                            let _recipient_word = match Word::try_from(recipient_hash) {
                                 Ok(word) => word,
                                 Err(e) => {
                                     eprintln!("[Zcash Relayer] Invalid recipient hash in tx {}: {} - {}", txid, recipient_hash, e);
