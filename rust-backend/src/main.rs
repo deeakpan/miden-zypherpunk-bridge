@@ -110,6 +110,21 @@ struct ConsumeNoteResponse {
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
+struct BalanceRequest {
+    account_id: String, // Can be bech32 or hex
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct BalanceResponse {
+    balance: String, // Balance in tokens (e.g., "0.3")
+    balance_raw: u64, // Raw balance in smallest units
+    faucet_id: String,
+    success: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
 struct FaucetResponse {
     faucet_account_id: String,
     symbol: String,
@@ -1068,27 +1083,290 @@ async fn consume_deposit_note(
     }
     
     // Reconstruct the note
+    println!("[Consume Note] Reconstructing note...");
     let note = reconstruct_deposit_note(account_id, secret, faucet_id, amount)
         .map_err(|e| format!("Failed to reconstruct note: {:?}", e))?;
     
-    // Get note ID before moving the note
-    let note_id_hex = note.id().to_hex();
+    // Get note ID and commitment before moving the note
+    let note_id = note.id();
+    let note_id_hex = note_id.to_hex();
+    let note_commitment = note.commitment();
+    println!("[Consume Note] Note reconstructed:");
+    println!("  Note ID: {}", note_id_hex);
+    println!("  Note Commitment: 0x{}", note_commitment.to_hex());
     
     // Build consume transaction using unauthenticated_input_notes
+    println!("[Consume Note] Building transaction...");
     let secret_word: miden_objects::Word = secret;
     let tx_request = TransactionRequestBuilder::new()
         .unauthenticated_input_notes([(note, Some(secret_word.into()))])
         .build()
-        .map_err(|e| format!("Failed to build transaction: {:?}", e))?;
+        .map_err(|e| {
+            let error_msg = format!("{:?}", e);
+            eprintln!("[Consume Note] Transaction build error: {}", error_msg);
+            format!("Failed to build transaction: {}", error_msg)
+        })?;
+    println!("[Consume Note] Transaction built successfully");
     
     // Submit transaction
+    println!("[Consume Note] Submitting transaction...");
+    println!("  Account: {}", account_id.to_bech32(miden_objects::address::NetworkId::Testnet));
+    println!("  Note ID: {}", note_id_hex);
+    println!("  Faucet ID: {}", faucet_id.to_bech32(miden_objects::address::NetworkId::Testnet));
+    println!("  Amount: {}", amount);
+    
     let tx_id = client
         .submit_new_transaction(account_id, tx_request)
         .await
-        .map_err(|e| format!("Failed to submit transaction: {}", e))?;
+        .map_err(|e| {
+            // Format the error with full details
+            let error_debug = format!("{:?}", e);
+            let error_display = format!("{}", e);
+            eprintln!("[Consume Note] Transaction submission failed!");
+            eprintln!("  Error (Display): {}", error_display);
+            eprintln!("  Error (Debug): {}", error_debug);
+            
+            // Return a comprehensive error message
+            format!("Failed to submit transaction. Error: {}. Full details: {}", error_display, error_debug)
+        })?;
+    
+    println!("[Consume Note] Transaction submitted successfully!");
+    println!("  TX ID: 0x{}", tx_id.to_hex());
     
     let tx_id_hex = tx_id.to_hex();
     Ok((tx_id_hex, note_id_hex))
+}
+
+#[options("/account/balance")]
+fn options_account_balance() -> rocket::http::Status {
+    rocket::http::Status::Ok
+}
+
+#[post("/account/balance", format = "json", data = "<request>")]
+async fn get_account_balance(
+    _state: &rocket::State<State>,
+    request: Json<BalanceRequest>,
+) -> Result<Json<BalanceResponse>, status::Custom<Json<ErrorResponse>>> {
+    // Parse account_id (accepts both bech32 and hex)
+    let account_id = if request.account_id.starts_with("mtst") || request.account_id.starts_with("mm") {
+        let (_, acc_id) = AccountId::from_bech32(&request.account_id)
+            .map_err(|e| {
+                status::Custom(
+                    Status::BadRequest,
+                    Json(ErrorResponse {
+                        success: false,
+                        error: format!("Invalid bech32 account_id: {}", e),
+                    }),
+                )
+            })?;
+        acc_id
+    } else {
+        let hex_str = if request.account_id.starts_with("0x") {
+            &request.account_id[2..]
+        } else {
+            &request.account_id
+        };
+        let hex_with_prefix = format!("0x{}", hex_str);
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| {
+                status::Custom(
+                    Status::BadRequest,
+                    Json(ErrorResponse {
+                        success: false,
+                        error: format!("Failed to parse account_id: {}", e),
+                    }),
+                )
+            })?
+    };
+    
+    // Setup paths
+    let current_dir = std::env::current_dir()
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to get current directory: {}", e),
+                }),
+            )
+        })?;
+    
+    let project_root = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        current_dir
+    };
+    
+    let keystore_path = project_root.join("rust-backend").join("keystore");
+    let store_path = project_root.join("bridge_store.sqlite3");
+    let rpc_url = std::env::var("RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
+    
+    // Get faucet ID from env or use default
+    let faucet_id_hex = std::env::var("FAUCET_ID")
+        .unwrap_or_else(|_| {
+            // Try to get from faucets.db
+            use rust_backend::db::faucets::FaucetStore;
+            let faucet_store = FaucetStore::new(project_root.join("faucets.db"))
+                .ok();
+            if let Some(store) = faucet_store {
+                if let Ok(Some(faucet_id)) = store.get_faucet_id("zcash") {
+                    use miden_objects::utils::Serializable;
+                    let faucet_bytes = faucet_id.to_bytes();
+                    format!("0x{}", faucet_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        });
+    
+    println!("[Balance Endpoint] Using faucet ID: {}", faucet_id_hex);
+    
+    if faucet_id_hex.is_empty() {
+        return Err(status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: "Faucet ID not configured. Set FAUCET_ID env var or ensure faucets.db exists.".to_string(),
+            }),
+        ));
+    }
+    
+    let faucet_id = AccountId::from_hex(&faucet_id_hex)
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Invalid faucet ID: {}", e),
+                }),
+            )
+        })?;
+    
+    // Get balance
+    let balance_result = tokio::task::spawn_blocking({
+        let keystore_path = keystore_path.clone();
+        let store_path = store_path.clone();
+        let rpc_url = rpc_url.clone();
+        move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+            rt.block_on(async {
+                get_account_balance_helper(
+                    account_id,
+                    faucet_id,
+                    keystore_path,
+                    store_path,
+                    &rpc_url,
+                )
+                .await
+            })
+        }
+    })
+    .await
+    .map_err(|e| {
+        status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Spawn blocking error: {}", e),
+            }),
+        )
+    })?
+    .map_err(|e: String| {
+        status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Failed to get balance: {}", e),
+            }),
+        )
+    })?;
+    
+    Ok(Json(BalanceResponse {
+        balance: balance_result.0,
+        balance_raw: balance_result.1,
+        faucet_id: faucet_id_hex,
+        success: true,
+    }))
+}
+
+// Helper function to get account balance
+async fn get_account_balance_helper(
+    account_id: AccountId,
+    faucet_id: AccountId,
+    keystore_path: PathBuf,
+    store_path: PathBuf,
+    rpc_url: &str,
+) -> Result<(String, u64), String> {
+    // Initialize full client (needed for private accounts - they're stored locally, not queryable via RPC)
+    let endpoint = Endpoint::try_from(rpc_url)
+        .map_err(|e| format!("Failed to parse RPC endpoint: {}", e))?;
+    
+    let rpc_client = Arc::new(GrpcClient::new(&endpoint, 10_000));
+    
+    if !keystore_path.exists() {
+        return Err(format!("Keystore directory does not exist: {:?}", keystore_path));
+    }
+    
+    let keystore = Arc::new(
+        FilesystemKeyStore::<StdRng>::new(keystore_path.clone())
+            .map_err(|e| format!("Failed to create keystore at {:?}: {}", keystore_path, e))?,
+    );
+    
+    let mut client = ClientBuilder::new()
+        .rpc(rpc_client)
+        .sqlite_store(store_path)
+        .authenticator(keystore)
+        .in_debug_mode(true.into())
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build client: {}", e))?;
+    
+    // Sync state to get latest account data
+    client.sync_state().await
+        .map_err(|e| format!("Failed to sync client state: {}", e))?;
+    
+    // Get account from client store (works for both public and private accounts)
+    // Private accounts are stored locally, not queryable via RPC
+    let account_record = client.get_account(account_id).await
+        .map_err(|e| format!("Failed to get account from client: {}", e))?;
+    
+    let account_record = account_record
+        .ok_or_else(|| {
+            format!(
+                "Account {} not found in client store. The account must be created and added to the client first.",
+                account_id.to_bech32(miden_objects::address::NetworkId::Testnet)
+            )
+        })?;
+    
+    // Get the account object from AccountRecord
+    // AccountRecord has an account() method that returns &Account
+    let account = account_record.account();
+    let vault = account.vault();
+    
+    // Get balance for the faucet
+    println!("[Balance Helper] Getting balance for faucet: {}", faucet_id.to_bech32(miden_objects::address::NetworkId::Testnet));
+    let balance = vault.get_balance(faucet_id)
+        .map_err(|e| format!("Failed to get balance from vault: {:?}", e))?;
+    
+    println!("[Balance Helper] Raw balance: {}", balance);
+    
+    // Convert to tokens (8 decimals for wTAZ)
+    // get_balance returns u64 directly
+    let balance_raw = balance;
+    let balance_tokens = balance_raw as f64 / 1e8;
+    let balance_str = if balance_tokens % 1.0 == 0.0 {
+        format!("{}", balance_tokens as u64)
+    } else {
+        format!("{}", balance_tokens).trim_end_matches('0').trim_end_matches('.').to_string()
+    };
+    
+    Ok((balance_str, balance_raw))
 }
 
 #[launch]
@@ -1238,7 +1516,7 @@ fn rocket() -> _ {
                 });
             })
         }))
-        .mount("/", routes![get_block, health, options_create_account, create_account, create_faucet, mint_from_faucet, options_hash, get_hash_endpoint, generate_hash_endpoint, options_claim, claim_deposit_endpoint, reconstruct_note_endpoint, consume_note_endpoint])
+        .mount("/", routes![get_block, health, options_create_account, create_account, create_faucet, mint_from_faucet, options_hash, get_hash_endpoint, generate_hash_endpoint, options_claim, claim_deposit_endpoint, reconstruct_note_endpoint, consume_note_endpoint, options_account_balance, get_account_balance])
         .attach(
             CorsOptions::default()
                 .allowed_origins(AllowedOrigins::all())

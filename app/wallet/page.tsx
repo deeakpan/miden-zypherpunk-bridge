@@ -208,165 +208,86 @@ export default function WalletPage() {
 
   // Load Miden balance
   const loadMidenBalance = useCallback(async (accountObj?: any) => {
-    if (!client || !accountId) return;
+    if (!accountId) return;
     
     try {
       setLoadingBalance(true);
-      const acc = accountObj || account;
-      if (!acc) return;
       
-      await client.syncState();
+      // Use backend endpoint to get balance (backend has the account)
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
+      const balanceResponse = await fetch(`${backendUrl}/account/balance`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          account_id: accountId, // Backend accepts bech32 or hex
+        }),
+      });
       
-      // Get WTAZ faucet ID from env
-      const { AccountId } = await import("@demox-labs/miden-sdk");
-      const faucetIdHex = process.env.NEXT_PUBLIC_FAUCET_ID;
-      if (!faucetIdHex) {
-        console.warn("NEXT_PUBLIC_FAUCET_ID not set, cannot load balance");
+      if (!balanceResponse.ok) {
+        let errorMessage = "Failed to get balance";
+        try {
+          const errorData = await balanceResponse.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch {
+          const errorText = await balanceResponse.text();
+          errorMessage = errorText || errorMessage;
+        }
+        console.error("Backend balance error:", errorMessage);
+        setMidenBalance("0");
         return;
       }
-      const faucetId = AccountId.fromHex(faucetIdHex);
       
-      console.log("Loading balance for faucet:", faucetIdHex);
+      const balanceData = await balanceResponse.json();
+      if (balanceData.success && balanceData.balance !== undefined) {
+        console.log("✅ Balance from backend:", balanceData.balance);
+        setMidenBalance(balanceData.balance);
+      } else {
+        console.warn("Invalid balance response:", balanceData);
+        setMidenBalance("0");
+      }
       
-      // Get account record from client - this should have the vault
-      const accountRecord = await client.getAccount(acc.id());
-      console.log("Account record type:", accountRecord?.constructor?.name);
-      console.log("Account record methods:", accountRecord ? Object.getOwnPropertyNames(Object.getPrototypeOf(accountRecord)) : []);
-      
-      // Get account assets from vault
-      let assets: any[] = [];
-      try {
-        if (accountRecord) {
-          // Try to get vault from account record
-          if (typeof accountRecord.vault === 'function') {
-            const vault = accountRecord.vault();
-            console.log("Vault object:", vault);
-            console.log("Vault methods:", vault ? Object.getOwnPropertyNames(Object.getPrototypeOf(vault)) : []);
-            console.log("Vault properties:", vault ? Object.keys(vault) : []);
-            
-            if (vault) {
-              // Get all methods available on vault
-              const vaultMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(vault));
-              console.log("Vault methods:", vaultMethods);
-              
-              // Use getBalance method with faucet ID - this is the correct way!
-              try {
-                if (typeof vault.getBalance === 'function') {
-                  const balance = vault.getBalance(faucetId); // Note: might be sync, not async
-                  console.log("Balance from vault.getBalance():", balance);
-                  if (balance !== null && balance !== undefined) {
-                    const balanceNum = typeof balance === 'bigint' ? Number(balance) : Number(balance);
-                    const balanceInTokens = balanceNum / 1e8;
-                    // Remove trailing zeros and unnecessary decimals
-                    const balanceStr = balanceInTokens % 1 === 0 
-                      ? balanceInTokens.toString() 
-                      : balanceInTokens.toFixed(8).replace(/\.?0+$/, '');
-                    console.log("Setting balance to:", balanceStr);
-                    setMidenBalance(balanceStr);
-                    return; // Exit early - we got the balance!
-                  }
-                }
-              } catch (e) {
-                console.error("getBalance failed:", e);
-              }
-              
-              // Try getting all assets
-              try {
-                const methodsToTry = ['getAssets', 'getAll', 'assets', 'get_assets'];
-                for (const methodName of methodsToTry) {
-                  if (typeof vault[methodName] === 'function') {
-                    try {
-                      const result = await vault[methodName]();
-                      console.log(`Assets from ${methodName}():`, result);
-                      if (result && (Array.isArray(result) || result.length !== undefined)) {
-                        assets = Array.isArray(result) ? result : Array.from(result);
-                        if (assets.length > 0) break;
-                      }
-                    } catch (e) {
-                      try {
-                        const result = vault[methodName]();
-                        if (result && (Array.isArray(result) || result.length !== undefined)) {
-                          assets = Array.isArray(result) ? result : Array.from(result);
-                          if (assets.length > 0) break;
-                        }
-                      } catch (e2) {}
-                    }
-                  }
-                }
-              } catch (e: any) {
-                console.error("Error accessing vault methods:", e);
-              }
-            }
-          }
+      // Fallback: Try WebClient if available (for accounts created in browser)
+      if (client && accountObj) {
+        try {
+          await client.syncState();
           
-          // Also try direct assets access
-          if ((!assets || assets.length === 0) && accountRecord.assets) {
-            assets = Array.isArray(accountRecord.assets) ? accountRecord.assets : [];
+          // Get WTAZ faucet ID from env
+          const { AccountId } = await import("@demox-labs/miden-sdk");
+          const faucetIdHex = process.env.NEXT_PUBLIC_FAUCET_ID;
+          if (!faucetIdHex) {
+            return; // Already set balance from backend
           }
-        }
-      } catch (e: any) {
-        console.error("Error getting assets from vault:", e);
-      }
-      
-      console.log("All assets found:", assets);
-      if (assets.length > 0) {
-        console.log("Asset details:", assets.map((a: any) => ({
-          type: a.constructor?.name,
-          methods: Object.getOwnPropertyNames(Object.getPrototypeOf(a)),
-          props: Object.keys(a)
-        })));
-      }
-      
-      // Filter for WTAZ faucet assets and calculate balance
-      let balance = "0";
-      if (assets && Array.isArray(assets) && assets.length > 0) {
-        const wtazAssets = assets.filter((asset: any) => {
-          try {
-            // Try different ways to get the faucet ID from the asset
-            let assetFaucetId: any = null;
-            if (asset.faucetId) {
-              assetFaucetId = typeof asset.faucetId === 'function' ? asset.faucetId() : asset.faucetId;
-            } else if (asset.faucet_id) {
-              assetFaucetId = asset.faucet_id;
-            } else if (asset.origin) {
-              assetFaucetId = asset.origin;
+          const faucetId = AccountId.fromHex(faucetIdHex);
+          
+          // Get account record from client - this should have the vault
+          const accountRecord = await client.getAccount(accountObj.id());
+          
+          if (accountRecord) {
+            // Try to get vault from account record
+            if (typeof accountRecord.vault === 'function') {
+              const vault = accountRecord.vault();
+              
+              if (vault && typeof vault.getBalance === 'function') {
+                const balance = vault.getBalance(faucetId);
+                if (balance !== null && balance !== undefined) {
+                  const balanceNum = typeof balance === 'bigint' ? Number(balance) : Number(balance);
+                  const balanceInTokens = balanceNum / 1e8;
+                  const balanceStr = balanceInTokens % 1 === 0 
+                    ? balanceInTokens.toString() 
+                    : balanceInTokens.toFixed(8).replace(/\.?0+$/, '');
+                  console.log("Balance from WebClient:", balanceStr);
+                  setMidenBalance(balanceStr);
+                }
+              }
             }
-            
-            if (assetFaucetId) {
-              const assetIdStr = assetFaucetId.toString ? assetFaucetId.toString() : String(assetFaucetId);
-              const faucetIdStr = faucetId.toString();
-              console.log("Comparing asset faucet:", assetIdStr, "with target:", faucetIdStr);
-              return assetIdStr === faucetIdStr || assetIdStr.includes(faucetIdHex.replace('0x', ''));
-            }
-            return false;
-          } catch (e) {
-            console.error("Error filtering asset:", e);
-            return false;
           }
-        });
-        
-        console.log("WTAZ assets:", wtazAssets);
-        
-        if (wtazAssets.length > 0) {
-          const total = wtazAssets.reduce((sum: bigint, asset: any) => {
-            try {
-              const amount = asset.amount ? (typeof asset.amount === 'function' ? asset.amount() : asset.amount) : BigInt(0);
-              return sum + BigInt(amount.toString());
-            } catch (e) {
-              console.error("Error getting amount:", e);
-              return sum;
-            }
-          }, BigInt(0));
-          const balanceInTokens = Number(total) / 1e8;
-          // Remove trailing zeros and unnecessary decimals
-          balance = balanceInTokens % 1 === 0 
-            ? balanceInTokens.toString() 
-            : balanceInTokens.toFixed(8).replace(/\.?0+$/, '');
+        } catch (e) {
+          console.warn("WebClient balance fallback failed:", e);
+          // Keep backend balance
         }
       }
-      
-      console.log("Final WTAZ Balance:", balance);
-      setMidenBalance(balance);
     } catch (err: any) {
       console.error("Failed to load balance:", err);
       setError(`Failed to load balance: ${err.message}`);
@@ -463,9 +384,32 @@ export default function WalletPage() {
       setError("");
       setScanning(true);
       
-      const acc = accountObj || account;
+      // Try to get account object - load from client if not available
+      let acc = accountObj || account;
+      if (!acc && accountId) {
+        try {
+          await client.syncState();
+          const accounts = await client.getAccounts();
+          const { NetworkId } = await import("@demox-labs/miden-sdk");
+          acc = accounts.find((a: any) => {
+            try {
+              return (a.id() as any).toBech32?.(NetworkId.Testnet) === accountId;
+            } catch {
+              return false;
+            }
+          });
+          if (acc) {
+            setAccount(acc);
+          }
+        } catch (e) {
+          console.warn("Failed to load account from client:", e);
+        }
+      }
+      
       if (!acc) {
-        console.error("No account object available for scanning notes");
+        console.warn("No account object available for scanning notes. Account may not be in WebClient store yet.");
+        console.warn("The account was created by the backend and may not be in the WebClient's IndexedDB yet.");
+        console.warn("Notes will be available after the account is synced to the WebClient store.");
         return;
       }
       
