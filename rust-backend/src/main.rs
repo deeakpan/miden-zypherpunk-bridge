@@ -1474,11 +1474,14 @@ async fn get_pool_balance(
     let balance_str = balance_result.spendable.trim();
     let balance_num: f64 = balance_str.parse().unwrap_or(0.0);
     
+    // Format to 8 decimal places (TAZ uses 8 decimals)
+    let balance_formatted = format!("{:.8}", balance_num);
+    
     // Convert to base units (8 decimals for wTAZ, but TAZ uses 8 decimals too)
     let balance_raw = (balance_num * 1e8) as u64;
     
     Ok(Json(PoolBalanceResponse {
-        balance: balance_str.to_string(),
+        balance: balance_formatted,
         balance_raw,
         faucet_id: "zcash".to_string(), // Not applicable for Zcash balance
         success: true,

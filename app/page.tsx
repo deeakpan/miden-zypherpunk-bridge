@@ -484,8 +484,8 @@ export default function App() {
               </div>
             </div>
 
-            {/* Amount - Only show if NOT Zcash to Miden */}
-            {!(fromChain === "Zcash" && toChain === "Miden") && (
+            {/* Amount - Only show if NOT Zcash to Miden and NOT Miden to Zcash */}
+            {!(fromChain === "Zcash" && toChain === "Miden") && !(fromChain === "Miden" && toChain === "Zcash") && (
               <div className="mb-5">
                 <label className="block text-xs text-zinc-400 mb-2 uppercase tracking-widest font-semibold">Amount</label>
                 <div className="relative group">
@@ -663,7 +663,7 @@ export default function App() {
                       <Loader2 className="w-4 h-4 text-[#FF6B35] animate-spin" />
                     ) : (
                       <span className="text-lg font-bold text-[#FF6B35]">
-                        {poolBalance !== null ? `${poolBalance} wTAZ` : "—"}
+                        {poolBalance !== null ? `${poolBalance} TAZ` : "—"}
                       </span>
                     )}
                   </div>
