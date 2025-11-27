@@ -23,7 +23,6 @@ use rocket::http::Status;
 use rocket::response::status;
 use rocket_cors::{AllowedOrigins, CorsOptions};
 use rust_backend::bridge::deposit::{ClaimDepositRequest, ClaimDepositResponse};
-use rust_backend::bridge::relayer::ZcashRelayer;
 use rust_backend::db::deposits::DepositTracker;
 use rust_backend::miden::recipient::build_deposit_recipient;
 use rust_backend::miden::notes::reconstruct_deposit_note;
@@ -33,7 +32,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::time::Duration;
 use miden_objects::{account::AccountId, Word};
-use rocket::fairing::AdHoc;
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
@@ -125,6 +123,39 @@ struct BalanceResponse {
 
 #[derive(Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
+struct PoolBalanceRequest {
+    faucet_id: Option<String>, // Optional, if not provided uses default
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct PoolBalanceResponse {
+    balance: String,
+    balance_raw: u64,
+    faucet_id: String,
+    success: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct WithdrawalRequest {
+    account_id: String, // User's Miden account (bech32 or hex)
+    zcash_address: String, // Zcash testnet address
+    amount: u64, // Amount in base units (8 decimals)
+    faucet_id: Option<String>, // Optional, defaults to wTAZ faucet
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct WithdrawalResponse {
+    note_id: String,
+    transaction_id: String,
+    success: bool,
+    message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
 struct FaucetResponse {
     faucet_account_id: String,
     symbol: String,
@@ -136,7 +167,7 @@ struct FaucetResponse {
 struct State {
     rpc: Arc<dyn NodeRpcClient + Send + Sync + 'static>,
     keystore: Arc<FilesystemKeyStore<StdRng>>,
-    bridge_wallet: BridgeWallet,
+    bridge_wallet: Arc<BridgeWallet>,
     deposit_tracker: Arc<Mutex<DepositTracker>>,
 }
 
@@ -1108,15 +1139,37 @@ async fn consume_deposit_note(
         })?;
     println!("[Consume Note] Transaction built successfully");
     
-    // Submit transaction
-    println!("[Consume Note] Submitting transaction...");
+    // Execute transaction (same pattern as mint_deposit_note)
+    println!("[Consume Note] Executing transaction...");
     println!("  Account: {}", account_id.to_bech32(miden_objects::address::NetworkId::Testnet));
     println!("  Note ID: {}", note_id_hex);
     println!("  Faucet ID: {}", faucet_id.to_bech32(miden_objects::address::NetworkId::Testnet));
     println!("  Amount: {}", amount);
     
-    let tx_id = client
-        .submit_new_transaction(account_id, tx_request)
+    let tx_result = client
+        .execute_transaction(account_id, tx_request)
+        .await
+        .map_err(|e| {
+            let error_msg = format!("{:?}", e);
+            eprintln!("[Consume Note] Transaction execution failed: {}", error_msg);
+            format!("Failed to execute transaction: {}", error_msg)
+        })?;
+    
+    // Prove transaction
+    println!("[Consume Note] Proving transaction...");
+    let proven_tx = client
+        .prove_transaction(&tx_result)
+        .await
+        .map_err(|e| {
+            let error_msg = format!("{:?}", e);
+            eprintln!("[Consume Note] Transaction proof failed: {}", error_msg);
+            format!("Failed to prove transaction: {}", error_msg)
+        })?;
+    
+    // Submit proven transaction
+    println!("[Consume Note] Submitting proven transaction...");
+    let submission_height = client
+        .submit_proven_transaction(proven_tx, &tx_result)
         .await
         .map_err(|e| {
             // Format the error with full details
@@ -1125,16 +1178,25 @@ async fn consume_deposit_note(
             eprintln!("[Consume Note] Transaction submission failed!");
             eprintln!("  Error (Display): {}", error_display);
             eprintln!("  Error (Debug): {}", error_debug);
-            
-            // Return a comprehensive error message
-            format!("Failed to submit transaction. Error: {}. Full details: {}", error_display, error_debug)
+            format!("Failed to submit transaction: {}", error_debug)
         })?;
     
-    println!("[Consume Note] Transaction submitted successfully!");
-    println!("  TX ID: 0x{}", tx_id.to_hex());
+    // Apply transaction
+    client
+        .apply_transaction(&tx_result, submission_height)
+        .await
+        .map_err(|e| {
+            let error_msg = format!("{:?}", e);
+            eprintln!("[Consume Note] Transaction apply failed: {}", error_msg);
+            format!("Failed to apply transaction: {}", error_msg)
+        })?;
     
-    let tx_id_hex = tx_id.to_hex();
-    Ok((tx_id_hex, note_id_hex))
+    let tx_id = tx_result.executed_transaction().id().to_hex();
+    
+    println!("[Consume Note] Transaction submitted successfully!");
+    println!("  TX ID: 0x{}", tx_id);
+    
+    Ok((tx_id, note_id_hex))
 }
 
 #[options("/account/balance")]
@@ -1369,6 +1431,83 @@ async fn get_account_balance_helper(
     Ok((balance_str, balance_raw))
 }
 
+#[options("/pool/balance")]
+fn options_pool_balance() -> rocket::http::Status {
+    rocket::http::Status::Ok
+}
+
+#[post("/pool/balance", format = "json", data = "<request>")]
+async fn get_pool_balance(
+    state: &rocket::State<State>,
+    request: Json<PoolBalanceRequest>,
+) -> Result<Json<PoolBalanceResponse>, status::Custom<Json<ErrorResponse>>> {
+    // Request is optional (can be empty JSON), we ignore it and use default faucet
+    let _ = request;
+    // Get Zcash bridge wallet balance (pool balance in TAZ)
+    let balance_result = tokio::task::spawn_blocking({
+        let bridge_wallet = state.bridge_wallet.clone();
+        move || {
+            bridge_wallet.get_balance()
+        }
+    })
+    .await
+    .map_err(|e| {
+        status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Spawn blocking error: {}", e),
+            }),
+        )
+    })?
+    .map_err(|e: String| {
+        status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Failed to get pool balance: {}", e),
+            }),
+        )
+    })?;
+    
+    // Parse TAZ balance string to number
+    let balance_str = balance_result.spendable.trim();
+    let balance_num: f64 = balance_str.parse().unwrap_or(0.0);
+    
+    // Convert to base units (8 decimals for wTAZ, but TAZ uses 8 decimals too)
+    let balance_raw = (balance_num * 1e8) as u64;
+    
+    Ok(Json(PoolBalanceResponse {
+        balance: balance_str.to_string(),
+        balance_raw,
+        faucet_id: "zcash".to_string(), // Not applicable for Zcash balance
+        success: true,
+    }))
+}
+
+#[options("/withdrawal/create")]
+fn options_withdrawal_create() -> rocket::http::Status {
+    rocket::http::Status::Ok
+}
+
+#[post("/withdrawal/create", format = "json", data = "<request>")]
+async fn create_withdrawal(
+    _state: &rocket::State<State>,
+    request: Json<WithdrawalRequest>,
+) -> Result<Json<WithdrawalResponse>, status::Custom<Json<ErrorResponse>>> {
+    // Request is required but not yet implemented
+    let _ = request;
+    // TODO: Implement withdrawal note creation and consumption
+    // For now, return error indicating it's not yet implemented
+    Err(status::Custom(
+        Status::NotImplemented,
+        Json(ErrorResponse {
+            success: false,
+            error: "Withdrawal functionality not yet implemented. Need to compile CROSSCHAIN script first.".to_string(),
+        }),
+    ))
+}
+
 #[launch]
 fn rocket() -> _ {
     // Load .env file from project root (works whether running from root or rust-backend)
@@ -1422,8 +1561,7 @@ fn rocket() -> _ {
     );
     
     // Initialize bridge wallet (project_root already set above)
-    let bridge_wallet = BridgeWallet::new(project_root.clone());
-    let bridge_wallet_arc = Arc::new(BridgeWallet::new(project_root.clone()));
+    let bridge_wallet = Arc::new(BridgeWallet::new(project_root.clone()));
     
     // Initialize deposit tracker database
     let db_path = project_root.join("deposits.db");
@@ -1472,12 +1610,6 @@ fn rocket() -> _ {
         }
     }
     
-    // Start Zcash relayer as background task (will be started on liftoff)
-    let scan_interval = std::env::var("ZCASH_RELAYER_INTERVAL_SECS")
-        .unwrap_or_else(|_| "5".to_string())
-        .parse::<u64>()
-        .unwrap_or(5);
-    
     // Allow port to be configured via ROCKET_PORT env var, default to 8001
     let port = std::env::var("ROCKET_PORT")
         .unwrap_or_else(|_| "8001".to_string())
@@ -1493,30 +1625,7 @@ fn rocket() -> _ {
             bridge_wallet,
             deposit_tracker: Arc::new(Mutex::new(deposit_tracker)),
         })
-        .attach(AdHoc::on_liftoff("Zcash Relayer", move |_| {
-            let bridge_wallet_for_relayer = bridge_wallet_arc.clone();
-            let project_root_for_relayer = project_root.clone();
-            let scan_interval_for_relayer = scan_interval;
-            Box::pin(async move {
-                println!("[Server] Starting Zcash relayer in background...");
-                let relayer = ZcashRelayer::new(
-                    bridge_wallet_for_relayer,
-                    project_root_for_relayer,
-                    scan_interval_for_relayer,
-                );
-                // Spawn in a separate thread with its own runtime to handle non-Send Miden client types
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("Failed to create Tokio runtime for relayer");
-                    rt.block_on(async {
-                        relayer.start().await;
-                    });
-                });
-            })
-        }))
-        .mount("/", routes![get_block, health, options_create_account, create_account, create_faucet, mint_from_faucet, options_hash, get_hash_endpoint, generate_hash_endpoint, options_claim, claim_deposit_endpoint, reconstruct_note_endpoint, consume_note_endpoint, options_account_balance, get_account_balance])
+        .mount("/", routes![get_block, health, options_create_account, create_account, create_faucet, mint_from_faucet, options_hash, get_hash_endpoint, generate_hash_endpoint, options_claim, claim_deposit_endpoint, reconstruct_note_endpoint, consume_note_endpoint, options_account_balance, get_account_balance, options_pool_balance, get_pool_balance, options_withdrawal_create, create_withdrawal])
         .attach(
             CorsOptions::default()
                 .allowed_origins(AllowedOrigins::all())

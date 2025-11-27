@@ -1,7 +1,7 @@
 "use client";
 
 import { Lock, ArrowUpDown, Sparkles, Copy, Check, Hash, Key, Download, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import LoadingModal from "./components/LoadingModal";
@@ -22,6 +22,16 @@ export default function App() {
   const [accountIdError, setAccountIdError] = useState("");
   const [hashGenerated, setHashGenerated] = useState(false);
   const [showSendModal, setShowSendModal] = useState(false);
+  
+  // Withdrawal state (Miden → Zcash)
+  const [zcashAddress, setZcashAddress] = useState("");
+  const [withdrawalAmount, setWithdrawalAmount] = useState("");
+  const [poolBalance, setPoolBalance] = useState<string | null>(null);
+  const [userBalance, setUserBalance] = useState<string | null>(null);
+  const [loadingPoolBalance, setLoadingPoolBalance] = useState(false);
+  const [loadingUserBalance, setLoadingUserBalance] = useState(false);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawalError, setWithdrawalError] = useState("");
 
   const midenDepositAddress = "utest1s7vrs7ycxvpu379zvtxt0fnc0efseur2f8g2s8puqls7nk45l6p7wvglu3rph9us9qzsjww44ly3wxlsul0jcpqx8qwvwqz4sq48rjj0cn59956sjsrz5ufuswd5ujy89n3vh264wx3843pxscnrf0ulku4990h65h5ll9r0j3q82mjgm2sx7lfnrkfkuqw9l2m7yfmgc4jvzq6n8j2";
 
@@ -184,7 +194,180 @@ export default function App() {
     const temp = fromChain;
     setFromChain(toChain);
     setToChain(temp);
+    // Clear withdrawal form when swapping
+    setZcashAddress("");
+    setWithdrawalAmount("");
+    setPoolBalance(null);
+    setUserBalance(null);
+    setWithdrawalError("");
   };
+
+  // Load pool balance (faucet account balance)
+  const loadPoolBalance = async () => {
+    if (fromChain !== "Miden" || toChain !== "Zcash") return;
+    
+    setLoadingPoolBalance(true);
+    try {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
+      const response = await fetch(`${backendUrl}/pool/balance`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setPoolBalance(data.balance);
+      } else {
+        const error = await response.json();
+        console.error("Failed to load pool balance:", error.error);
+        setPoolBalance("0");
+      }
+    } catch (error) {
+      console.error("Error loading pool balance:", error);
+      setPoolBalance("0");
+    } finally {
+      setLoadingPoolBalance(false);
+    }
+  };
+
+  // Load user balance
+  const loadUserBalance = async () => {
+    if (fromChain !== "Miden" || toChain !== "Zcash") return;
+    
+    const accountId = typeof window !== "undefined" 
+      ? localStorage.getItem("miden_account_id") || localStorage.getItem("miden_account_id_hex")
+      : null;
+    
+    if (!accountId) {
+      setUserBalance("0");
+      return;
+    }
+    
+    setLoadingUserBalance(true);
+    try {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
+      const response = await fetch(`${backendUrl}/account/balance`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_id: accountId }),
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setUserBalance(data.balance);
+      } else {
+        const error = await response.json();
+        console.error("Failed to load user balance:", error.error);
+        setUserBalance("0");
+      }
+    } catch (error) {
+      console.error("Error loading user balance:", error);
+      setUserBalance("0");
+    } finally {
+      setLoadingUserBalance(false);
+    }
+  };
+
+  // Validate withdrawal amount
+  const validateWithdrawalAmount = (amount: string): string => {
+    if (!amount || amount.trim() === "") {
+      return "";
+    }
+    
+    const numAmount = parseFloat(amount);
+    if (isNaN(numAmount) || numAmount <= 0) {
+      return "Amount must be greater than 0";
+    }
+    
+    const userBalanceNum = userBalance ? parseFloat(userBalance) : 0;
+    const poolBalanceNum = poolBalance ? parseFloat(poolBalance) : 0;
+    
+    if (numAmount > userBalanceNum) {
+      return `Amount exceeds your balance (${userBalance || "0"} wTAZ)`;
+    }
+    
+    if (numAmount > poolBalanceNum) {
+      return `Amount exceeds pool balance (${poolBalance || "0"} wTAZ)`;
+    }
+    
+    return "";
+  };
+
+  // Handle withdrawal amount change
+  const handleWithdrawalAmountChange = (value: string) => {
+    setWithdrawalAmount(value);
+    const error = validateWithdrawalAmount(value);
+    setWithdrawalError(error);
+  };
+
+  // Handle withdrawal
+  const handleWithdraw = async () => {
+    if (!zcashAddress || !withdrawalAmount) {
+      setWithdrawalError("Please enter Zcash address and amount");
+      return;
+    }
+    
+    const error = validateWithdrawalAmount(withdrawalAmount);
+    if (error) {
+      setWithdrawalError(error);
+      return;
+    }
+    
+    const accountId = typeof window !== "undefined" 
+      ? localStorage.getItem("miden_account_id") || localStorage.getItem("miden_account_id_hex")
+      : null;
+    
+    if (!accountId) {
+      setWithdrawalError("Please connect your Miden wallet first");
+      return;
+    }
+    
+    setWithdrawing(true);
+    setWithdrawalError("");
+    
+    try {
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
+      // Convert amount to base units (8 decimals)
+      const amountBase = Math.floor(parseFloat(withdrawalAmount) * 1e8);
+      
+      const response = await fetch(`${backendUrl}/withdrawal/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          account_id: accountId,
+          zcash_address: zcashAddress.trim(),
+          amount: amountBase,
+        }),
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        alert(`Withdrawal successful! Transaction ID: ${data.transaction_id}`);
+        // Reset form
+        setZcashAddress("");
+        setWithdrawalAmount("");
+        // Reload balances
+        await loadPoolBalance();
+        await loadUserBalance();
+      } else {
+        const error = await response.json();
+        setWithdrawalError(error.error || "Withdrawal failed");
+      }
+    } catch (error: any) {
+      setWithdrawalError(error.message || "Failed to create withdrawal");
+    } finally {
+      setWithdrawing(false);
+    }
+  };
+
+  // Load balances when switching to Miden → Zcash
+  useEffect(() => {
+    if (fromChain === "Miden" && toChain === "Zcash") {
+      loadPoolBalance();
+      loadUserBalance();
+    }
+  }, [fromChain, toChain]);
 
   return (
     <div className="min-h-screen bg-black text-white relative overflow-hidden">
@@ -469,8 +652,101 @@ export default function App() {
               </>
             )}
 
-            {/* Address (for other directions) */}
-            {!(fromChain === "Zcash" && toChain === "Miden") && (
+            {/* Withdrawal Form (Miden → Zcash) */}
+            {fromChain === "Miden" && toChain === "Zcash" && (
+              <>
+                {/* Pool Balance Display */}
+                <div className="mb-4 p-4 bg-zinc-950/60 border border-[#FF6B35]/20 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-zinc-400 uppercase tracking-widest font-semibold">Pool Balance</span>
+                    {loadingPoolBalance ? (
+                      <Loader2 className="w-4 h-4 text-[#FF6B35] animate-spin" />
+                    ) : (
+                      <span className="text-lg font-bold text-[#FF6B35]">
+                        {poolBalance !== null ? `${poolBalance} wTAZ` : "—"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* User Balance Display */}
+                <div className="mb-4 p-4 bg-zinc-950/60 border border-zinc-900 rounded-xl">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-zinc-400 uppercase tracking-widest font-semibold">Your Balance</span>
+                    {loadingUserBalance ? (
+                      <Loader2 className="w-4 h-4 text-zinc-500 animate-spin" />
+                    ) : (
+                      <span className="text-lg font-bold text-white">
+                        {userBalance !== null ? `${userBalance} wTAZ` : "—"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Zcash Address Input */}
+                <div className="mb-6">
+                  <label className="block text-xs text-zinc-400 mb-2 uppercase tracking-widest font-semibold">
+                    Zcash Address
+                  </label>
+                  <div className="relative group">
+                    <input
+                      type="text"
+                      value={zcashAddress}
+                      onChange={(e) => setZcashAddress(e.target.value)}
+                      placeholder="Enter your Zcash testnet address"
+                      className="w-full px-5 py-4 bg-zinc-950/80 border border-zinc-900 rounded-xl text-sm focus:outline-none focus:border-[#FF6B35]/50 focus:ring-2 focus:ring-[#FF6B35]/20 transition-all placeholder-zinc-700"
+                    />
+                    <div className="absolute inset-0 border-2 border-[#FF6B35]/0 rounded-xl group-focus-within:border-[#FF6B35]/30 transition-all pointer-events-none" />
+                  </div>
+                </div>
+
+                {/* Amount Input */}
+                <div className="mb-6">
+                  <label className="block text-xs text-zinc-400 mb-2 uppercase tracking-widest font-semibold">
+                    Amount (wTAZ)
+                  </label>
+                  <div className="relative group">
+                    <input
+                      type="number"
+                      step="0.00000001"
+                      min="0"
+                      value={withdrawalAmount}
+                      onChange={(e) => handleWithdrawalAmountChange(e.target.value)}
+                      placeholder="0.0"
+                      className="w-full px-5 py-4 bg-zinc-950/80 border border-zinc-900 rounded-xl text-sm focus:outline-none focus:border-[#FF6B35]/50 focus:ring-2 focus:ring-[#FF6B35]/20 transition-all placeholder-zinc-700"
+                    />
+                    <div className="absolute inset-0 border-2 border-[#FF6B35]/0 rounded-xl group-focus-within:border-[#FF6B35]/30 transition-all pointer-events-none" />
+                  </div>
+                  {withdrawalError && (
+                    <p className="text-xs text-red-400 mt-2">{withdrawalError}</p>
+                  )}
+                </div>
+
+                {/* Withdraw Button */}
+                <button
+                  onClick={handleWithdraw}
+                  disabled={withdrawing || !zcashAddress || !withdrawalAmount || !!withdrawalError}
+                  className="relative w-full py-4 bg-[#FF6B35] text-black font-bold text-base rounded-xl hover:bg-[#FF6B35]/90 active:scale-[0.98] transition-all shadow-[0_0_40px_rgba(255,107,53,0.4)] hover:shadow-[0_0_60px_rgba(255,107,53,0.6)] overflow-hidden group disabled:opacity-50 disabled:cursor-not-allowed">
+                  <span className="relative z-10 flex items-center justify-center gap-2">
+                    {withdrawing ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Withdrawing...
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-4 h-4" />
+                        Withdraw to Zcash
+                      </>
+                    )}
+                  </span>
+                  <div className="absolute inset-0 bg-white/20 translate-y-full group-hover:translate-y-0 transition-transform duration-300" />
+                </button>
+              </>
+            )}
+
+            {/* Address (for other directions - not Miden → Zcash) */}
+            {!(fromChain === "Zcash" && toChain === "Miden") && !(fromChain === "Miden" && toChain === "Zcash") && (
               <div className="mb-6">
                 <label className="block text-xs text-zinc-400 mb-2 uppercase tracking-widest font-semibold">Miden Address</label>
                 <div className="relative group">
@@ -486,8 +762,8 @@ export default function App() {
               </div>
             )}
 
-            {/* Button (only show if not Zcash to Miden flow) */}
-            {!(fromChain === "Zcash" && toChain === "Miden") && (
+            {/* Button (only show if not Zcash to Miden or Miden to Zcash flow) */}
+            {!(fromChain === "Zcash" && toChain === "Miden") && !(fromChain === "Miden" && toChain === "Zcash") && (
               <button className="relative w-full py-4 bg-[#FF6B35] text-black font-bold text-base rounded-xl hover:bg-[#FF6B35]/90 active:scale-[0.98] transition-all shadow-[0_0_40px_rgba(255,107,53,0.4)] hover:shadow-[0_0_60px_rgba(255,107,53,0.6)] overflow-hidden group">
                 <span className="relative z-10 flex items-center justify-center gap-2">
                   <Sparkles className="w-4 h-4" />

@@ -102,17 +102,9 @@ export default function WalletPage() {
       const client = await WebClient.createClient("https://rpc.testnet.miden.io");
       setClient(client);
       
-      // Register bridge note tag (2005) to sync bridge notes
-      try {
-        const { NoteTag } = await import("@demox-labs/miden-sdk");
-        const BRIDGE_USECASE = 2005;
-        const bridgeNoteTag = NoteTag.forLocalUseCase(BRIDGE_USECASE, 0);
-        await client.addNoteTag(bridgeNoteTag);
-        console.log("Registered bridge note tag:", BRIDGE_USECASE);
-      } catch (tagError) {
-        console.warn("Failed to register note tag (non-critical):", tagError);
-        // Continue even if tag registration fails
-      }
+      // Note: Bridge note tag registration is handled by the backend
+      // The WebClient SDK doesn't have addNoteTag method, so we skip this
+      // The backend handles note tag registration when consuming notes
       
       const storedAccountId = localStorage.getItem("miden_account_id");
       
@@ -251,39 +243,39 @@ export default function WalletPage() {
       // Fallback: Try WebClient if available (for accounts created in browser)
       if (client && accountObj) {
         try {
-          await client.syncState();
-          
-          // Get WTAZ faucet ID from env
-          const { AccountId } = await import("@demox-labs/miden-sdk");
-          const faucetIdHex = process.env.NEXT_PUBLIC_FAUCET_ID;
-          if (!faucetIdHex) {
+      await client.syncState();
+      
+      // Get WTAZ faucet ID from env
+      const { AccountId } = await import("@demox-labs/miden-sdk");
+      const faucetIdHex = process.env.NEXT_PUBLIC_FAUCET_ID;
+      if (!faucetIdHex) {
             return; // Already set balance from backend
-          }
-          const faucetId = AccountId.fromHex(faucetIdHex);
-          
-          // Get account record from client - this should have the vault
+      }
+      const faucetId = AccountId.fromHex(faucetIdHex);
+      
+      // Get account record from client - this should have the vault
           const accountRecord = await client.getAccount(accountObj.id());
-          
-          if (accountRecord) {
-            // Try to get vault from account record
-            if (typeof accountRecord.vault === 'function') {
-              const vault = accountRecord.vault();
+      
+        if (accountRecord) {
+          // Try to get vault from account record
+          if (typeof accountRecord.vault === 'function') {
+            const vault = accountRecord.vault();
               
               if (vault && typeof vault.getBalance === 'function') {
                 const balance = vault.getBalance(faucetId);
-                if (balance !== null && balance !== undefined) {
-                  const balanceNum = typeof balance === 'bigint' ? Number(balance) : Number(balance);
-                  const balanceInTokens = balanceNum / 1e8;
-                  const balanceStr = balanceInTokens % 1 === 0 
-                    ? balanceInTokens.toString() 
-                    : balanceInTokens.toFixed(8).replace(/\.?0+$/, '');
+                  if (balance !== null && balance !== undefined) {
+                    const balanceNum = typeof balance === 'bigint' ? Number(balance) : Number(balance);
+                    const balanceInTokens = balanceNum / 1e8;
+                    const balanceStr = balanceInTokens % 1 === 0 
+                      ? balanceInTokens.toString() 
+                      : balanceInTokens.toFixed(8).replace(/\.?0+$/, '');
                   console.log("Balance from WebClient:", balanceStr);
-                  setMidenBalance(balanceStr);
+                    setMidenBalance(balanceStr);
+                  }
                 }
-              }
             }
-          }
-        } catch (e) {
+                      }
+                    } catch (e) {
           console.warn("WebClient balance fallback failed:", e);
           // Keep backend balance
         }
@@ -535,6 +527,7 @@ export default function WalletPage() {
       try {
         await client.syncState();
         const accounts = await client.getAccounts();
+        const { NetworkId } = await import("@demox-labs/miden-sdk");
         accountToUse = accounts.find((acc: any) => {
           try {
             return (acc.id() as any).toBech32?.(NetworkId.Testnet) === accountId;
@@ -568,23 +561,8 @@ export default function WalletPage() {
         throw new Error("Invalid .mno file: missing required fields (account_id, secret, faucet_id, amount)");
       }
       
-      // Parse account_id (can be hex with or without 0x, or bech32)
-      let recipientAccountId: any;
-      const accountIdStr = mnoData.account_id.trim();
-      if (accountIdStr.startsWith("mtst") || accountIdStr.startsWith("mm")) {
-        const { AccountId, NetworkId } = await import("@demox-labs/miden-sdk");
-        recipientAccountId = AccountId.fromBech32(accountIdStr, NetworkId.Testnet);
-      } else {
-        const { AccountId } = await import("@demox-labs/miden-sdk");
-        const hexStr = accountIdStr.startsWith("0x") ? accountIdStr : `0x${accountIdStr}`;
-        // Pad to 30 hex chars if needed (15 bytes)
-        const hexOnly = hexStr.slice(2);
-        const paddedHex = hexOnly.length < 30 ? `0x${hexOnly.padStart(30, '0')}` : hexStr;
-        recipientAccountId = AccountId.fromHex(paddedHex);
-      }
-      
-      // Verify the account_id matches the current wallet (for validation only)
-      // Backend will handle the actual consumption
+      // Backend handles account_id parsing (accepts both bech32 and hex)
+      // We just pass the account_id as-is from the .mno file or use current wallet
       const currentAccountIdBech32 = accountId;
       const mnoAccountId = mnoData.account_id.trim();
       
@@ -640,6 +618,7 @@ export default function WalletPage() {
         
         // Try to reload account for balance refresh (optional)
         const accounts = await client.getAccounts();
+        const { NetworkId } = await import("@demox-labs/miden-sdk");
         const updatedAccount = accounts.find((a: any) => {
           try {
             return (a.id() as any).toBech32?.(NetworkId.Testnet) === accountId;

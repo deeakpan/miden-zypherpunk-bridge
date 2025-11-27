@@ -36,6 +36,14 @@ path = "src/bin/consume_note.rs"
 name = "convert_account_id"
 path = "src/bin/convert_account_id.rs"
 
+[[bin]]
+name = "zcash_relayer"
+path = "src/bin/zcash_relayer.rs"
+
+[[bin]]
+name = "miden_exit_relayer"
+path = "src/bin/miden_exit_relayer.rs"
+
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
 miden-client-sqlite-store = { version = "0.12" }
