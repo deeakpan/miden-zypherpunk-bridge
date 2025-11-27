@@ -1,0 +1,102 @@
+use.miden::account
+use.miden::faucet
+use.miden::tx
+use.miden::note
+use.miden::output_note
+use.std::sys
+
+#CONSTANTS
+# =================================================================================================
+const.PRIVATE_NOTE=2
+const.BRIDGE_EVENT_TAG=2005
+
+const.BRIDGE_NOTE_CODE_COMMITMENT_FELT1=0
+const.BRIDGE_NOTE_CODE_COMMITMENT_FELT2=0
+const.BRIDGE_NOTE_CODE_COMMITMENT_FELT3=0
+const.BRIDGE_NOTE_CODE_COMMITMENT_FELT4=0
+
+const.SERIAL_NUM_SLOT=4
+const.INPUTS_SLOT=16
+
+const.INPUTS_NUM_WORDS_LOC=0
+const.INPUTS_INDEX_LOC=1
+
+#! Burns fungible assets and emits public notes with BRIDGE_EVENT tag and event payload in its inputs
+#!
+#! Inputs:
+#!   - OUTPUT_NOTE_SERIAL_NUM
+#!   - ASSET
+#!   - dest_chain_id
+#!   - dest_chain_addr_felt1
+#!   - dest_chain_addr_felt2
+#!   - dest_chain_addr_felt3
+#!   - calldata_bytes_length
+#!   - calldata
+#!   - call_addr_felt1
+#!   - call_addr_felt2
+#!   - call_addr_felt3
+#! Outputs: [pad(16)]
+#!
+#! Where:
+#! - ASSET is the fungible asset to be burned.
+#!
+#! Panics if:
+#! - the transaction is executed against an account which is not a fungible asset faucet.
+#! - the transaction is executed against a faucet which is not the origin of the specified asset.
+#! - the amount about to be burned is greater than the outstanding supply of the asset.
+#!
+#! Invocation: call
+export.bridge.2
+    mem_storew_be.SERIAL_NUM_SLOT dropw
+
+    # burning the asset
+    exec.faucet::burn
+    # => [ASSET, ...]
+
+    dup.8 add.12
+    # => [inputs_num, ...]
+
+    u32divmod.4 neq.0 add
+    # => [roudn_up(input_num / 4), ...]
+
+    loc_store.INPUTS_NUM_WORDS_LOC
+    push.0 loc_store.INPUTS_INDEX_LOC
+
+    loc_load.INPUTS_INDEX_LOC loc_load.INPUTS_NUM_WORDS_LOC lt
+    while.true
+        loc_load.INPUTS_INDEX_LOC mul.4 add.INPUTS_SLOT
+        mem_storew_be dropw
+        loc_load.INPUTS_INDEX_LOC add.1 loc_store.INPUTS_INDEX_LOC
+        loc_load.INPUTS_INDEX_LOC loc_load.INPUTS_NUM_WORDS_LOC lt
+    end
+
+    # Pad to 8 elements
+    loc_load.INPUTS_NUM_WORDS_LOC u32mod.2
+    if.true
+        padw loc_load.INPUTS_NUM_WORDS_LOC mul.4 add.INPUTS_SLOT mem_storew_be
+        dropw
+        loc_load.INPUTS_NUM_WORDS_LOC add.1 loc_store.INPUTS_NUM_WORDS_LOC
+    end
+
+    loc_load.INPUTS_NUM_WORDS_LOC mul.4 push.INPUTS_SLOT
+    exec.note::compute_inputs_commitment
+    # => [INPUTS_COMMITMENT, ...]
+
+    push.BRIDGE_NOTE_CODE_COMMITMENT_FELT1.BRIDGE_NOTE_CODE_COMMITMENT_FELT2.BRIDGE_NOTE_CODE_COMMITMENT_FELT3.BRIDGE_NOTE_CODE_COMMITMENT_FELT4
+    # => [SCRIPT_COMMITMENT, INPUTS_COMMITMENT]
+
+    padw mem_loadw_be.SERIAL_NUM_SLOT
+    # => [SERIAL_NUM, SCRIPT_ROOT, INPUTS_COMMITMENT]
+
+    exec.note::build_recipient_hash
+    # => [RECIPIENT]
+
+    push.1.1.0.BRIDGE_EVENT_TAG
+    # => [tag, aux, note_type, execution_hint, RECIPIENT]
+
+    exec.output_note::create
+    # => [note_idx, pad(15)]
+
+    exec.sys::truncate_stack
+end
+

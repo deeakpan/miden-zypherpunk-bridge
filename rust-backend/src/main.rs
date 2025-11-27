@@ -1493,22 +1493,331 @@ fn options_withdrawal_create() -> rocket::http::Status {
     rocket::http::Status::Ok
 }
 
+// Helper function to parse account ID from string (bech32 or hex)
+fn parse_account_id(account_id_str: &str) -> Result<AccountId, String> {
+    if account_id_str.starts_with("mtst") || account_id_str.starts_with("mm") {
+        // Try bech32 format first
+        match AccountId::from_bech32(account_id_str) {
+            Ok((_, acc_id)) => Ok(acc_id),
+            Err(bech32_err) => {
+                // If bech32 fails, try hex as fallback
+                let hex_str = if account_id_str.starts_with("0x") {
+                    &account_id_str[2..]
+                } else {
+                    account_id_str
+                };
+                AccountId::from_hex(hex_str).map_err(|hex_err| {
+                    format!("Tried bech32: {}. Tried hex: {}", bech32_err, hex_err)
+                })
+            }
+        }
+    } else {
+        // Parse hex format
+        let hex_str = if account_id_str.starts_with("0x") {
+            &account_id_str[2..]
+        } else {
+            account_id_str
+        };
+        let hex_with_prefix = if !hex_str.starts_with("0x") {
+            format!("0x{}", hex_str)
+        } else {
+            hex_str.to_string()
+        };
+        AccountId::from_hex(&hex_with_prefix)
+            .map_err(|e| format!("Invalid hex format: {}", e))
+    }
+}
+
 #[post("/withdrawal/create", format = "json", data = "<request>")]
 async fn create_withdrawal(
     _state: &rocket::State<State>,
     request: Json<WithdrawalRequest>,
 ) -> Result<Json<WithdrawalResponse>, status::Custom<Json<ErrorResponse>>> {
-    // Request is required but not yet implemented
-    let _ = request;
-    // TODO: Implement withdrawal note creation and consumption
-    // For now, return error indicating it's not yet implemented
-    Err(status::Custom(
-        Status::NotImplemented,
+    use rust_backend::miden::notes::{create_zcash_withdrawal_note, encode_zcash_address, BRIDGE_USECASE};
+    use miden_objects::{note::NoteTag, Felt, Word};
+    
+    // Parse account ID
+    let account_id = parse_account_id(&request.account_id)
+        .map_err(|e| status::Custom(
+            Status::BadRequest,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Invalid account_id: {}", e),
+            }),
+        ))?;
+    
+    // Get or create faucet
+    let project_root = std::env::current_dir()
+        .map_err(|e| status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Failed to get current directory: {}", e),
+            }),
+        ))?;
+    let keystore_path = project_root.join("rust-backend").join("keystore");
+    let store_path = project_root.join("bridge_store.sqlite3");
+    let faucet_store_path = project_root.join("faucets.db");
+    let rpc_url = std::env::var("RPC_URL")
+        .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
+    
+    let faucet_id = if let Some(faucet_id_str) = &request.faucet_id {
+        parse_account_id(faucet_id_str)
+            .map_err(|e| status::Custom(
+                Status::BadRequest,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Invalid faucet_id: {}", e),
+                }),
+            ))?
+    } else {
+        let keystore_path_clone = keystore_path.clone();
+        let store_path_clone = store_path.clone();
+        let faucet_store_path_clone = faucet_store_path.clone();
+        let rpc_url_clone = rpc_url.clone();
+        tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Runtime::new()
+                .expect("Failed to create runtime");
+            rt.block_on(async {
+                rust_backend::bridge::deposit::get_or_create_zcash_faucet(
+                    keystore_path_clone,
+                    store_path_clone,
+                    &rpc_url_clone,
+                    faucet_store_path_clone,
+                )
+                .await
+            })
+        })
+        .await
+        .map_err(|e| status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Spawn blocking error: {}", e),
+            }),
+        ))?
+        .map_err(|e: String| status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Get or create faucet error: {}", e),
+            }),
+        ))?
+    };
+    
+    // Encode Zcash address first (synchronous)
+    let zcash_address_felts = encode_zcash_address(&request.zcash_address)
+        .map_err(|e| status::Custom(
+            Status::BadRequest,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Invalid Zcash address: {}", e),
+            }),
+        ))?;
+    
+    // Zcash testnet chain ID (using a placeholder - should be the actual chain ID)
+    let dest_chain = Felt::new(2); // 2 = Zcash testnet (placeholder)
+    
+    // Create note tag
+    let note_tag = NoteTag::for_local_use_case(BRIDGE_USECASE, 0)
+        .map_err(|e| status::Custom(
+            Status::InternalServerError,
+            Json(ErrorResponse {
+                success: false,
+                error: format!("Failed to create note tag: {:?}", e),
+            }),
+        ))?;
+    
+    // Generate secret and output serial number in blocking task
+    let (secret, output_serial_number) = tokio::task::spawn_blocking(move || {
+        use rand::random;
+        let secret = Word::new([
+            Felt::new(random::<u64>()),
+            Felt::new(random::<u64>()),
+            Felt::new(random::<u64>()),
+            Felt::new(random::<u64>()),
+        ]);
+        let output_serial_number = Word::new([
+            Felt::new(random::<u64>()),
+            Felt::new(random::<u64>()),
+            Felt::new(random::<u64>()),
+            Felt::new(random::<u64>()),
+        ]);
+        (secret, output_serial_number)
+    })
+    .await
+    .map_err(|e| status::Custom(
+        Status::InternalServerError,
         Json(ErrorResponse {
             success: false,
-            error: "Withdrawal functionality not yet implemented. Need to compile CROSSCHAIN script first.".to_string(),
+            error: format!("Failed to generate random values: {}", e),
         }),
-    ))
+    ))?;
+    
+    // Create withdrawal note
+    let note = tokio::task::spawn_blocking(move || {
+        create_zcash_withdrawal_note(
+            secret,
+            output_serial_number,
+            dest_chain,
+            zcash_address_felts,
+            None, // unblock_timestamp
+            faucet_id,
+            request.amount,
+            account_id,
+            note_tag,
+        )
+    })
+    .await
+    .map_err(|e| status::Custom(
+        Status::InternalServerError,
+        Json(ErrorResponse {
+            success: false,
+            error: format!("Spawn blocking error: {}", e),
+        }),
+    ))?
+    .map_err(|e| status::Custom(
+        Status::InternalServerError,
+        Json(ErrorResponse {
+            success: false,
+            error: format!("Failed to create withdrawal note: {:?}", e),
+        }),
+    ))?;
+    
+    let note_id = note.id().to_hex();
+    
+    // Now consume the note to burn the assets
+    // This will execute the CROSSCHAIN script which burns assets and emits exit event
+    // Move to spawn_blocking because Miden client is not Send
+    let keystore_path_clone = keystore_path.clone();
+    let store_path_clone = store_path.clone();
+    let rpc_url_clone = rpc_url.clone();
+    let (tx_id, _) = tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Runtime::new()
+            .expect("Failed to create runtime");
+        rt.block_on(async {
+            consume_withdrawal_note(
+                account_id,
+                note,
+                keystore_path_clone,
+                store_path_clone,
+                &rpc_url_clone,
+            )
+            .await
+        })
+    })
+    .await
+    .map_err(|e| status::Custom(
+        Status::InternalServerError,
+        Json(ErrorResponse {
+            success: false,
+            error: format!("Spawn blocking error: {}", e),
+        }),
+    ))?
+    .map_err(|e: String| status::Custom(
+        Status::InternalServerError,
+        Json(ErrorResponse {
+            success: false,
+            error: format!("Failed to consume withdrawal note: {}", e),
+        }),
+    ))?;
+    
+    Ok(Json(WithdrawalResponse {
+        note_id,
+        transaction_id: tx_id,
+        success: true,
+        message: "Withdrawal note created and consumed successfully. Assets burned and exit event emitted.".to_string(),
+    }))
+}
+
+// Helper function to consume a withdrawal note
+async fn consume_withdrawal_note(
+    account_id: AccountId,
+    note: miden_objects::note::Note,
+    keystore_path: PathBuf,
+    store_path: PathBuf,
+    rpc_url: &str,
+) -> Result<(String, String), String> {
+    use miden_client::transaction::TransactionRequestBuilder;
+    
+    // Initialize Miden client
+    let endpoint = Endpoint::try_from(rpc_url)
+        .map_err(|e| format!("Failed to parse RPC endpoint: {}", e))?;
+    
+    let rpc_client = Arc::new(GrpcClient::new(&endpoint, 10_000));
+    
+    if !keystore_path.exists() {
+        return Err(format!("Keystore directory does not exist: {:?}", keystore_path));
+    }
+    
+    let keystore = Arc::new(
+        FilesystemKeyStore::<StdRng>::new(keystore_path.clone())
+            .map_err(|e| format!("Failed to create keystore at {:?}: {}", keystore_path, e))?,
+    );
+    
+    let mut client = ClientBuilder::new()
+        .rpc(rpc_client)
+        .sqlite_store(store_path)
+        .authenticator(keystore)
+        .in_debug_mode(true.into())
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build client: {}", e))?;
+    
+    // Sync state
+    client.sync_state().await
+        .map_err(|e| format!("Failed to sync client state: {}", e))?;
+    
+    // Check if account exists
+    let wallet_account = client.get_account(account_id).await
+        .map_err(|e| format!("Failed to get account: {}", e))?;
+    
+    if wallet_account.is_none() {
+        return Err(format!(
+            "Account {} not found in client store.",
+            account_id.to_bech32(miden_objects::address::NetworkId::Testnet)
+        ));
+    }
+    
+    // Get note ID before moving the note
+    let note_id = note.id().to_hex();
+    
+    // Build transaction to consume the withdrawal note
+    // The note will be consumed and the CROSSCHAIN script will execute,
+    // burning the assets and emitting a public exit event
+    // Use unauthenticated_input_notes since we just created the note locally
+    let tx_request = TransactionRequestBuilder::new()
+        .unauthenticated_input_notes([(note, None)])
+        .build()
+        .map_err(|e| format!("Failed to build transaction: {:?}", e))?;
+    
+    // Execute transaction
+    let tx_result = client
+        .execute_transaction(account_id, tx_request)
+        .await
+        .map_err(|e| format!("Failed to execute transaction: {:?}", e))?;
+    
+    // Prove transaction
+    let proven_tx = client
+        .prove_transaction(&tx_result)
+        .await
+        .map_err(|e| format!("Failed to prove transaction: {:?}", e))?;
+    
+    // Submit proven transaction
+    let submission_height = client
+        .submit_proven_transaction(proven_tx, &tx_result)
+        .await
+        .map_err(|e| format!("Failed to submit transaction: {:?}", e))?;
+    
+    // Apply transaction
+    client
+        .apply_transaction(&tx_result, submission_height)
+        .await
+        .map_err(|e| format!("Failed to apply transaction: {:?}", e))?;
+    
+    let tx_id = tx_result.executed_transaction().id().to_hex();
+    
+    Ok((tx_id, note_id))
 }
 
 #[launch]

@@ -4,7 +4,7 @@ use miden_objects::{
     asset::{Asset, FungibleAsset},
     note::{
         Note, NoteAssets, NoteExecutionHint, NoteInputs, NoteMetadata,
-        NoteTag, NoteType,
+        NoteRecipient, NoteTag, NoteType,
     },
     FieldElement, Felt, NoteError, Word,
 };
@@ -27,7 +27,7 @@ pub const BRIDGE_USECASE: u16 = 2005;
 /// * `sender` - Sender account ID (user's Miden account)
 /// * `note_tag` - Note tag for bridge identification
 pub fn create_zcash_withdrawal_note(
-    _secret: Word,
+    secret: Word,
     output_serial_number: Word,
     dest_chain: Felt,
     zcash_address: [Felt; 3],
@@ -77,26 +77,49 @@ pub fn create_zcash_withdrawal_note(
         Felt::ZERO, // call_addr[2]
     ])?;
 
-    // Note: We need the CROSSCHAIN script compiled and included
-    // For now, we'll use a placeholder that will need to be replaced
-    // when we compile the MASM script
+    // Load the compiled CROSSCHAIN script
+    use crate::miden::bridge_scripts::crosschain;
+    let script = crosschain();
     
-    // TODO: Load the compiled CROSSCHAIN script
-    // For now, we'll create the note structure but the script needs to be
-    // compiled from CROSSCHAIN.masm and included at build time
+    // Create note assets
+    let assets = NoteAssets::new(vec![asset.into()])?;
     
-    // Create a placeholder recipient - in production, this needs the actual script
-    // The script should be loaded similar to how mono bridge does it in build.rs
-    // For now, we'll use a dummy script hash that will need to be replaced
+    // Create note metadata
+    let metadata = NoteMetadata::new(
+        sender,
+        NoteType::Private,
+        note_tag,
+        NoteExecutionHint::always(),
+        Felt::ZERO,
+    )
+    .map_err(|e| NoteError::other(format!("Failed to create metadata: {:?}", e)))?;
     
-    // This is a workaround - we need to compile the script first
-    // The recipient requires: secret + script_root + inputs_commitment
-    // We can't compute it without the actual script
+    // Create note inputs (13 inputs as required by CROSSCHAIN script)
+    let inputs = NoteInputs::new(vec![
+        output_serial_number[3],
+        output_serial_number[2],
+        output_serial_number[1],
+        output_serial_number[0],
+        dest_chain,
+        zcash_address[2], // Zcash testnet address part 1
+        zcash_address[1], // Zcash testnet address part 2
+        zcash_address[0], // Zcash testnet address part 3
+        Felt::new(unblock_timestamp.unwrap_or(0) as u64),
+        Felt::ZERO, // calldata_bytes_length
+        Felt::ZERO, // calldata (not used for Zcash testnet)
+        Felt::ZERO, // call_addr[0]
+        Felt::ZERO, // call_addr[1]
+        Felt::ZERO, // call_addr[2]
+    ])?;
     
-    // Return error for now - need to set up script compilation
-    Err(NoteError::other(
-        "CROSSCHAIN script compilation not yet set up. Need to compile CROSSCHAIN.masm and include it.".to_string(),
-    ))
+    // Create note recipient with the CROSSCHAIN script
+    // Use the provided secret (serial number) for the note
+    let recipient = NoteRecipient::new(secret, script, inputs);
+    
+    // Create the note
+    let note = Note::new(assets, metadata, recipient);
+    
+    Ok(note)
 }
 
 /// Reconstruct a P2ID note for deposits (Zcash testnet → Miden)

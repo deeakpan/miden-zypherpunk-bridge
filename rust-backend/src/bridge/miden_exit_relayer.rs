@@ -161,19 +161,20 @@ impl MidenExitRelayer {
             // Extract destination chain (input[4])
             let dest_chain = inputs[4].as_int();
             
-            // Zcash testnet chain ID (you'll need to define this)
-            const ZCASH_TESTNET_CHAIN_ID: u64 = 1; // Adjust this to actual Zcash testnet chain ID
+            // Zcash testnet chain ID (matches withdrawal note creation in main.rs)
+            const ZCASH_TESTNET_CHAIN_ID: u64 = 2;
             
             if dest_chain != ZCASH_TESTNET_CHAIN_ID {
-                println!("[Miden Exit Relayer] Note {} is for chain {}, not Zcash, skipping", note_id, dest_chain);
+                println!("[Miden Exit Relayer] Note {} is for chain {}, not Zcash (expected {}), skipping", note_id, dest_chain, ZCASH_TESTNET_CHAIN_ID);
                 continue;
             }
 
             // Extract Zcash address (inputs[5..8] - 3 felts)
+            // Note: inputs are: [output_serial_num[3], output_serial_num[2], output_serial_num[1], output_serial_num[0], dest_chain, zcash_addr[2], zcash_addr[1], zcash_addr[0], ...]
             let zcash_address_felts = [
-                inputs[7], // dest_addr[0]
-                inputs[6], // dest_addr[1]
-                inputs[5], // dest_addr[2]
+                inputs[7], // dest_addr[0] (zcash_address[0] from note creation)
+                inputs[6], // dest_addr[1] (zcash_address[1] from note creation)
+                inputs[5], // dest_addr[2] (zcash_address[2] from note creation)
             ];
 
             // Decode Zcash address from felts
@@ -182,9 +183,23 @@ impl MidenExitRelayer {
             let zcash_address = decode_zcash_address(zcash_address_felts)
                 .map_err(|e| format!("Failed to decode Zcash address: {}", e))?;
 
-            // Extract amount from note inputs (first input is the amount)
-            // Based on mono bridge pattern: amount is in inputs[0]
-            let amount = inputs[0].as_int();
+            // Extract amount from note assets (not inputs!)
+            // The amount is in the fungible asset that was burned
+            let assets = note_record.assets();
+            let mut amount = 0u64;
+            
+            // Iterate through assets to find fungible asset
+            for asset in assets.iter() {
+                if let miden_objects::asset::Asset::Fungible(fungible_asset) = asset {
+                    amount = fungible_asset.amount();
+                    break;
+                }
+            }
+            
+            if amount == 0 {
+                println!("[Miden Exit Relayer] Note {} has no fungible assets or zero amount, skipping", note_id);
+                continue;
+            }
 
             println!("[Miden Exit Relayer] Processing exit:");
             println!("  Note ID: {}", note_id);
