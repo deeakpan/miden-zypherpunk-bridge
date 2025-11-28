@@ -42,6 +42,14 @@ fn main() {
             .assemble_library([module])
             .expect("Failed to assemble fungible_wrapper library");
         
+        // Save library as .masl file for account component
+        let contracts_assets_dir = Path::new(&out_dir).join("assets/contracts");
+        fs::create_dir_all(&contracts_assets_dir).unwrap();
+        let masl_path = contracts_assets_dir.join("fungible_wrapper.masl");
+        let library_bytes = library.to_bytes();
+        fs::write(&masl_path, library_bytes).unwrap();
+        println!("cargo:warning=Saved library {} -> {}", fungible_wrapper_path.display(), masl_path.display());
+        
         assembler = assembler
             .with_dynamic_library(library)
             .expect("Failed to add fungible_wrapper library to assembler");

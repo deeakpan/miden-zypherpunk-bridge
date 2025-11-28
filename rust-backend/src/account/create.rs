@@ -8,6 +8,7 @@ use miden_client::{
 };
 use miden_client_sqlite_store::ClientBuilderSqliteExt;
 use miden_lib::account::auth::AuthRpoFalcon512;
+use crate::account::token_wrapper::TokenWrapperAccount;
 use miden_objects::{
     account::{AccountBuilder, AccountStorageMode, AccountType},
     asset::TokenSymbol,
@@ -106,6 +107,8 @@ pub async fn create_faucet_account(
     let mut init_seed = [0u8; 32];
     rng.fill_bytes(&mut init_seed);
     
+    println!("[Create Faucet] Generated new random seed for faucet account");
+    
     // Faucet parameters
     let token_symbol = TokenSymbol::new(symbol)
         .map_err(|e| format!("Invalid symbol: {}", e))?;
@@ -114,11 +117,16 @@ pub async fn create_faucet_account(
     // Generate key pair
     let key_pair = AuthSecretKey::new_rpo_falcon512();
     
-    // Build the faucet account
+    // Build the faucet account with TokenWrapperAccount component
+    // For Zcash bridge, origin_network=0 and origin_address=[0; 3] (not used)
+    let origin_network = 0u64;
+    let origin_address = [Felt::new(0); 3];
+    
     let faucet_account = AccountBuilder::new(init_seed)
         .account_type(AccountType::FungibleFaucet)
         .storage_mode(AccountStorageMode::Public)
         .with_auth_component(AuthRpoFalcon512::new(key_pair.public_key().to_commitment()))
+        .with_component(TokenWrapperAccount::new(origin_network, origin_address))
         .with_component(
             BasicFungibleFaucet::new(token_symbol, decimals, max_supply_felt)
                 .map_err(|e| format!("Failed to create faucet component: {}", e))?,
@@ -126,18 +134,22 @@ pub async fn create_faucet_account(
         .build()
         .map_err(|e| format!("Failed to build faucet: {}", e))?;
     
+    let new_faucet_id = faucet_account.id();
+    let new_faucet_id_bech32 = new_faucet_id.to_bech32(NetworkId::Testnet);
+    println!("[Create Faucet] New faucet account ID: {}", new_faucet_id_bech32);
+    
     // Add the faucet to the client
     client
         .add_account(&faucet_account, false)
         .await
         .map_err(|e| format!("Failed to add faucet: {}", e))?;
     
+    println!("[Create Faucet] ✅ Successfully added new faucet account to client");
+    
     // Add the key pair to the keystore
     keystore
         .add_key(&key_pair)
         .map_err(|e| format!("Failed to add key to keystore: {}", e))?;
-    
-    let faucet_account_id_bech32 = faucet_account.id().to_bech32(NetworkId::Testnet);
     
     // Resync to show newly deployed faucet
     client
@@ -145,6 +157,7 @@ pub async fn create_faucet_account(
         .await
         .map_err(|e| format!("Failed to sync state: {}", e))?;
     
-    Ok(faucet_account_id_bech32)
+    println!("[Create Faucet] ✅ Faucet account created and synced: {}", new_faucet_id_bech32);
+    Ok(new_faucet_id_bech32)
 }
 

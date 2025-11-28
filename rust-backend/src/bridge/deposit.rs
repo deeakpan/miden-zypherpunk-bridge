@@ -93,8 +93,9 @@ pub async fn get_or_create_zcash_faucet(
         return Ok(faucet_id);
     }
     
-    // Faucet doesn't exist, create it
-    println!("[Bridge] Creating Zcash testnet faucet (wTAZ)...");
+    // Faucet doesn't exist in faucets.db, create a new one
+    println!("[Bridge] Creating NEW Zcash testnet faucet (wTAZ)...");
+    println!("[Bridge] Note: If an old faucet exists in bridge_store.sqlite3, it will remain but a NEW one will be created.");
     let faucet_id_bech32 = create_faucet_account(
         &keystore_path,
         &store_path,
@@ -105,6 +106,8 @@ pub async fn get_or_create_zcash_faucet(
     )
     .await
     .map_err(|e| format!("Failed to create faucet: {}", e))?;
+    
+    println!("[Bridge] ✅ Created new faucet account: {}", faucet_id_bech32);
     
     // Parse faucet_id from bech32
     let faucet_id = AccountId::from_bech32(&faucet_id_bech32)

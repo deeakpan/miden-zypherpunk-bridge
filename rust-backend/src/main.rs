@@ -1181,7 +1181,7 @@ async fn consume_deposit_note(
             format!("Failed to submit transaction: {}", error_debug)
         })?;
     
-    // Apply transaction
+    // Apply transaction (updates account state in SQLite store)
     client
         .apply_transaction(&tx_result, submission_height)
         .await
@@ -1191,10 +1191,16 @@ async fn consume_deposit_note(
             format!("Failed to apply transaction: {}", error_msg)
         })?;
     
+    // Sync state to ensure balance is updated in SQLite store
+    println!("[Consume Note] Syncing state to update balance...");
+    client.sync_state().await
+        .map_err(|e| format!("Failed to sync state after consumption: {}", e))?;
+    
     let tx_id = tx_result.executed_transaction().id().to_hex();
     
-    println!("[Consume Note] Transaction submitted successfully!");
+    println!("[Consume Note] Transaction submitted and state synced successfully!");
     println!("  TX ID: 0x{}", tx_id);
+    println!("  Balance should now be updated in SQLite store");
     
     Ok((tx_id, note_id_hex))
 }
@@ -1547,7 +1553,8 @@ async fn create_withdrawal(
         ))?;
     
     // Get or create faucet
-    let project_root = std::env::current_dir()
+    // Calculate project root (same as balance endpoint)
+    let current_dir = std::env::current_dir()
         .map_err(|e| status::Custom(
             Status::InternalServerError,
             Json(ErrorResponse {
@@ -1555,6 +1562,16 @@ async fn create_withdrawal(
                 error: format!("Failed to get current directory: {}", e),
             }),
         ))?;
+    
+    let project_root = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        current_dir
+    };
+    
     let keystore_path = project_root.join("rust-backend").join("keystore");
     let store_path = project_root.join("bridge_store.sqlite3");
     let faucet_store_path = project_root.join("faucets.db");
@@ -1688,6 +1705,7 @@ async fn create_withdrawal(
     
     // Now consume the note to burn the assets
     // This will execute the CROSSCHAIN script which burns assets and emits exit event
+    // IMPORTANT: The note must be consumed by the FAUCET account (which has fungible_wrapper component)
     // Move to spawn_blocking because Miden client is not Send
     let keystore_path_clone = keystore_path.clone();
     let store_path_clone = store_path.clone();
@@ -1697,7 +1715,7 @@ async fn create_withdrawal(
             .expect("Failed to create runtime");
         rt.block_on(async {
             consume_withdrawal_note(
-                account_id,
+                faucet_id, // Use faucet account, not user account
                 note,
                 keystore_path_clone,
                 store_path_clone,
@@ -1731,8 +1749,10 @@ async fn create_withdrawal(
 }
 
 // Helper function to consume a withdrawal note
+// NOTE: The transaction must be executed against the FAUCET account (which has fungible_wrapper component)
+// The user's account doesn't need the component - the faucet account executes the CROSSCHAIN script
 async fn consume_withdrawal_note(
-    account_id: AccountId,
+    faucet_id: AccountId, // Faucet account that has fungible_wrapper component
     note: miden_objects::note::Note,
     keystore_path: PathBuf,
     store_path: PathBuf,
@@ -1755,6 +1775,9 @@ async fn consume_withdrawal_note(
             .map_err(|e| format!("Failed to create keystore at {:?}: {}", keystore_path, e))?,
     );
     
+    // Clone store_path for error message before moving it
+    let store_path_display = store_path.clone();
+    
     let mut client = ClientBuilder::new()
         .rpc(rpc_client)
         .sqlite_store(store_path)
@@ -1764,20 +1787,26 @@ async fn consume_withdrawal_note(
         .await
         .map_err(|e| format!("Failed to build client: {}", e))?;
     
-    // Sync state
+    // Sync state to load accounts from store (same as balance query)
+    // This should load accounts that were previously added to the SQLite store
     client.sync_state().await
         .map_err(|e| format!("Failed to sync client state: {}", e))?;
     
-    // Check if account exists
-    let wallet_account = client.get_account(account_id).await
-        .map_err(|e| format!("Failed to get account: {}", e))?;
+    // Check if FAUCET account exists in store (faucet has the fungible_wrapper component)
+    // The faucet account must be in the store to execute the CROSSCHAIN script
+    let faucet_account = client.get_account(faucet_id).await
+        .map_err(|e| format!("Failed to get faucet account: {}", e))?;
     
-    if wallet_account.is_none() {
+    if faucet_account.is_none() {
+        // Faucet account not found - it needs to be created/deployed first
         return Err(format!(
-            "Account {} not found in client store.",
-            account_id.to_bech32(miden_objects::address::NetworkId::Testnet)
+            "Faucet account {} not found in client store at {:?}. The faucet must be created and added to the client first (via /faucet/create or get_or_create_zcash_faucet).",
+            faucet_id.to_bech32(miden_objects::address::NetworkId::Testnet),
+            store_path_display
         ));
     }
+    
+    println!("[Consume Withdrawal] ✅ Faucet account found in store, proceeding with transaction");
     
     // Get note ID before moving the note
     let note_id = note.id().to_hex();
@@ -1791,9 +1820,9 @@ async fn consume_withdrawal_note(
         .build()
         .map_err(|e| format!("Failed to build transaction: {:?}", e))?;
     
-    // Execute transaction
+    // Execute transaction against FAUCET account (which has fungible_wrapper component)
     let tx_result = client
-        .execute_transaction(account_id, tx_request)
+        .execute_transaction(faucet_id, tx_request)
         .await
         .map_err(|e| format!("Failed to execute transaction: {:?}", e))?;
     
