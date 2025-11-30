@@ -151,13 +151,14 @@ pub async fn create_faucet_account(
         .add_key(&key_pair)
         .map_err(|e| format!("Failed to add key to keystore: {}", e))?;
     
-    // Resync to show newly deployed faucet
+    // Sync state - account will deploy automatically on first transaction (minting or withdrawal)
     client
         .sync_state()
         .await
         .map_err(|e| format!("Failed to sync state: {}", e))?;
     
-    println!("[Create Faucet] ✅ Faucet account created and synced: {}", new_faucet_id_bech32);
+    println!("[Create Faucet] ✅ Faucet account created with TokenWrapperAccount component: {}", new_faucet_id_bech32);
+    println!("[Create Faucet] Note: Account will deploy automatically on first use (minting or withdrawal)");
     Ok(new_faucet_id_bech32)
 }
 

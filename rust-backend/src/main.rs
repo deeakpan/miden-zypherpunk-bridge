@@ -756,9 +756,20 @@ async fn claim_deposit_endpoint(
     })?;
     
     // Get or create faucet automatically (auto-deploy on first deposit)
-    let project_root = std::env::current_dir()
+    let current_dir = std::env::current_dir()
         .map_err(|e| format!("Failed to get current directory: {}", e))?;
-    let keystore_path = project_root.join("keystore");
+    
+    // If we're in rust-backend, go up one level to project root
+    let project_root = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().to_path_buf()
+    } else {
+        current_dir
+    };
+    
+    let keystore_path = project_root.join("rust-backend").join("keystore");
     let store_path = project_root.join("bridge_store.sqlite3");
     let faucet_store_path = project_root.join("faucets.db");
     let rpc_url = std::env::var("RPC_URL")
@@ -947,37 +958,58 @@ async fn consume_note_endpoint(
             )
         })?;
     
-    // Parse faucet_id
-    let faucet_id = if request.faucet_id.starts_with("mtst") || request.faucet_id.starts_with("mm") {
-        let (_, fid) = AccountId::from_bech32(&request.faucet_id)
-            .map_err(|e| {
-                status::Custom(
-                    Status::BadRequest,
-                    Json(ErrorResponse {
-                        success: false,
-                        error: format!("Invalid bech32 faucet_id: {}", e),
-                    }),
-                )
-            })?;
-        fid
+    // Always get faucet_id from faucets.db (ignore faucet_id in .mno file)
+    println!("[Consume Note] Getting faucet_id from faucets.db...");
+    let current_dir = std::env::current_dir()
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to get current directory: {}", e),
+                }),
+            )
+        })?;
+    let project_root = if current_dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == "rust-backend")
+        .unwrap_or(false) {
+        current_dir.parent().unwrap().to_path_buf()
     } else {
-        let hex_str = if request.faucet_id.starts_with("0x") {
-            &request.faucet_id[2..]
-        } else {
-            &request.faucet_id
-        };
-        let hex_with_prefix = format!("0x{}", hex_str);
-        AccountId::from_hex(&hex_with_prefix)
-            .map_err(|e| {
-                status::Custom(
-                    Status::BadRequest,
-                    Json(ErrorResponse {
-                        success: false,
-                        error: format!("Failed to parse faucet_id: {}", e),
-                    }),
-                )
-            })?
+        current_dir
     };
+    let faucet_store_path = project_root.join("faucets.db");
+    use rust_backend::db::faucets::FaucetStore;
+    let faucet_store = FaucetStore::new(faucet_store_path)
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to open faucet store: {}", e),
+                }),
+            )
+        })?;
+    let faucet_id = faucet_store.get_faucet_id("zcash_testnet")
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to get faucet from store: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: "Faucet not found in store. Please create a faucet first.".to_string(),
+                }),
+            )
+        })?;
+    println!("[Consume Note] Using faucet_id from faucets.db: {}", faucet_id.to_bech32(miden_objects::address::NetworkId::Testnet));
     
     // Setup paths (same logic as init_client)
     let current_dir = std::env::current_dir()
@@ -1273,48 +1305,45 @@ async fn get_account_balance(
     let rpc_url = std::env::var("RPC_URL")
         .unwrap_or_else(|_| "https://rpc.testnet.miden.io".to_string());
     
-    // Get faucet ID from env or use default
-    let faucet_id_hex = std::env::var("FAUCET_ID")
-        .unwrap_or_else(|_| {
-            // Try to get from faucets.db
-            use rust_backend::db::faucets::FaucetStore;
-            let faucet_store = FaucetStore::new(project_root.join("faucets.db"))
-                .ok();
-            if let Some(store) = faucet_store {
-                if let Ok(Some(faucet_id)) = store.get_faucet_id("zcash") {
-                    use miden_objects::utils::Serializable;
-                    let faucet_bytes = faucet_id.to_bytes();
-                    format!("0x{}", faucet_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>())
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        });
-    
-    println!("[Balance Endpoint] Using faucet ID: {}", faucet_id_hex);
-    
-    if faucet_id_hex.is_empty() {
-        return Err(status::Custom(
-            Status::InternalServerError,
-            Json(ErrorResponse {
-                success: false,
-                error: "Faucet ID not configured. Set FAUCET_ID env var or ensure faucets.db exists.".to_string(),
-            }),
-        ));
-    }
-    
-    let faucet_id = AccountId::from_hex(&faucet_id_hex)
+    // Always get faucet ID from faucets.db (same as consume endpoint)
+    use rust_backend::db::faucets::FaucetStore;
+    let faucet_store = FaucetStore::new(project_root.join("faucets.db"))
         .map_err(|e| {
             status::Custom(
                 Status::InternalServerError,
                 Json(ErrorResponse {
                     success: false,
-                    error: format!("Invalid faucet ID: {}", e),
+                    error: format!("Failed to open faucets.db: {}", e),
                 }),
             )
         })?;
+    
+    let faucet_id = faucet_store.get_faucet_id("zcash_testnet")
+        .map_err(|e| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: format!("Failed to get faucet from faucets.db: {}", e),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            status::Custom(
+                Status::InternalServerError,
+                Json(ErrorResponse {
+                    success: false,
+                    error: "Faucet ID not found in faucets.db. Please create a faucet first.".to_string(),
+                }),
+            )
+        })?;
+    
+    // Convert to hex for logging
+    use miden_objects::utils::Serializable;
+    let faucet_bytes = faucet_id.to_bytes();
+    let faucet_id_hex = format!("0x{}", faucet_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+    
+    println!("[Balance Endpoint] Using faucet ID from faucets.db: {}", faucet_id.to_bech32(miden_objects::address::NetworkId::Testnet));
     
     // Get balance
     let balance_result = tokio::task::spawn_blocking({

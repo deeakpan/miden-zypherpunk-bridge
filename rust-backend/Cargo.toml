@@ -44,6 +44,14 @@ path = "src/bin/zcash_relayer.rs"
 name = "miden_exit_relayer"
 path = "src/bin/miden_exit_relayer.rs"
 
+[[bin]]
+name = "zcash_to_miden_bridge"
+path = "src/bin/zcash_to_miden_bridge.rs"
+
+[[bin]]
+name = "mint_tokens"
+path = "src/bin/mint_tokens.rs"
+
 [dependencies]
 miden-client = { version = "0.12", features = ["tonic", "testing"] }
 miden-client-sqlite-store = { version = "0.12" }
@@ -61,6 +69,8 @@ rocket = { version = "0.5.1", features = ["json"] }
 rocket_cors = "0.6.0"
 rusqlite = { version = "^0.36", features = ["bundled"] }
 dotenv = "0.15"
+reqwest = { version = "0.12", features = ["json"] }
+urlencoding = "2.1"
 
 [build-dependencies]
 miden-lib = { version = "0.12", default-features = false }
