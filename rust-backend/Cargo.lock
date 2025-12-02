@@ -379,6 +379,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link 0.2.1",
 ]
@@ -3634,6 +3635,7 @@ dependencies = [
 name = "rust-backend"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dotenv",
  "hex",
  "miden-assembly 0.17.2",

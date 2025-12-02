@@ -331,7 +331,8 @@ export default function App() {
       // Convert amount to base units (8 decimals)
       const amountBase = Math.floor(parseFloat(withdrawalAmount) * 1e8);
       
-      const response = await fetch(`${backendUrl}/withdrawal/create`, {
+      // Use the new commitment-based withdrawal endpoint
+      const response = await fetch(`${backendUrl}/withdrawal/create-commitment`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -343,7 +344,20 @@ export default function App() {
       
       if (response.ok) {
         const data = await response.json();
-        alert(`Withdrawal successful! Transaction ID: ${data.transaction_id}`);
+        // The new endpoint returns a .mno file format
+        // Download the .mno file for the user to claim later
+        const mnoContent = JSON.stringify(data, null, 2);
+        const blob = new Blob([mnoContent], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `withdrawal_${data.commitment?.substring(0, 16) || "withdrawal"}.mno`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        alert(`Withdrawal commitment created! Transaction ID: ${data.transaction_id}\n\nA .mno file has been downloaded. Use it later to claim your withdrawal.`);
         // Reset form
         setZcashAddress("");
         setWithdrawalAmount("");

@@ -71,6 +71,7 @@ rusqlite = { version = "^0.36", features = ["bundled"] }
 dotenv = "0.15"
 reqwest = { version = "0.12", features = ["json"] }
 urlencoding = "2.1"
+chrono = { version = "0.4", features = ["clock", "serde"] }
 
 [build-dependencies]
 miden-lib = { version = "0.12", default-features = false }
